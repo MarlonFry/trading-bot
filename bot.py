@@ -9,12 +9,13 @@ from alpaca.trading.enums import OrderSide, TimeInForce
 API_KEY = "PKGH6S4LYZMDR3PPRVYKXA5UX6"
 SECRET_KEY = "BNpVQLSsp8LdRsMSi9Z3PzyUGYsRDfHeKhBU36Q37Mgu"
 
-https://discord.com/api/webhooks/1558899105349107712/CGbhVCnvDDZGVuVRYwvdrCbXtZRMNcSHrRUrXUUO3Pp2vIhxlTeCfv9YciubAbjp4Ksf
+# HIER DEINE DISCORD WEBHOOK URL EINFÜGEN (falls vorhanden):
 DISCORD_WEBHOOK_URL = "" 
 
 trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
 
-TICKER = "AAPL"
+# MULTI-AKTIEN WATCHLIST
+TICKERS = ["AAPL", "NVDA", "TSLA", "MSFT"]
 STUECKZAHL = 1
 
 # Strategie & Risiko-Management Einstellungen
@@ -81,47 +82,47 @@ def verkaufe_aktie(symbol, menge, kurs, grund):
     sende_discord_nachricht(msg)
 
 # Haupt-Schleife
-print(f"=== STARTE ADVANCED TRADING BOT FÜR {TICKER} ===")
-sende_discord_nachricht(f"🚀 Bot gestartet für **{TICKER}** mit Take-Profit (+{TAKE_PROFIT_PROZENT*100}%) & Stop-Loss (-{STOP_LOSS_PROZENT*100}%).")
+print(f"=== STARTE MULTI-TICKER TRADING BOT FÜR {TICKERS} ===")
+sende_discord_nachricht(f"🚀 Bot gestartet für **{', '.join(TICKERS)}** mit Take-Profit (+{TAKE_PROFIT_PROZENT*100}%) & Stop-Loss (-{STOP_LOSS_PROZENT*100}%).")
 
 while True:
-    try:
-        kurs, durchschnitt = hole_markt_daten(TICKER)
-        pos = hole_position_details(TICKER)
-        
-        print(f"\n--- Check um {time.strftime('%H:%M:%S')} ---")
-        print(f"Aktueller Kurs: {kurs:.2f} USD | 5-Tage-Schnitt: {durchschnitt:.2f} USD")
-        
-        if pos["im_besitz"]:
-            kaufpreis = pos["kaufpreis"]
-            gewinn_verlust_prozent = (kurs - kaufpreis) / kaufpreis
-            print(f"Aktie im Depot: Ja | Einstieg: {kaufpreis:.2f} USD | P/L: {gewinn_verlust_prozent*100:+.2f}%")
+    print(f"\n==================== Check um {time.strftime('%H:%M:%S')} ====================")
+    for ticker in TICKERS:
+        try:
+            kurs, durchschnitt = hole_markt_daten(ticker)
+            pos = hole_position_details(ticker)
             
-            # 1. Prüfe TAKE-PROFIT (+2%)
-            if gewinn_verlust_prozent >= TAKE_PROFIT_PROZENT:
-                verkaufe_aktie(TICKER, pos["menge"], kurs, f"Take-Profit erreicht (+{gewinn_verlust_prozent*100:.2f}%) 🎯")
+            print(f"\n--- [{ticker}] Kurs: {kurs:.2f} USD | Schnitt: {durchschnitt:.2f} USD ---")
             
-            # 2. Prüfe STOP-LOSS (-1%)
-            elif gewinn_verlust_prozent <= -STOP_LOSS_PROZENT:
-                verkaufe_aktie(TICKER, pos["menge"], kurs, f"Stop-Loss ausgelöst ({gewinn_verlust_prozent*100:.2f}%) 🛡️")
-            
-            # 3. Prüfe Strategie-Verkauf (Kurs fällt unter Schnitt)
-            elif kurs < durchschnitt:
-                verkaufe_aktie(TICKER, pos["menge"], kurs, "Trendwende: Kurs unter Durchschnitt 📉")
+            if pos["im_besitz"]:
+                kaufpreis = pos["kaufpreis"]
+                gewinn_verlust_prozent = (kurs - kaufpreis) / kaufpreis
+                print(f"Im Depot: Ja | Einstieg: {kaufpreis:.2f} USD | P/L: {gewinn_verlust_prozent*100:+.2f}%")
                 
-            else:
-                print("-> Halte Position. Warten auf Zielkurs oder Trendwende...")
+                # 1. Take-Profit (+2%)
+                if gewinn_verlust_prozent >= TAKE_PROFIT_PROZENT:
+                    verkaufe_aktie(ticker, pos["menge"], kurs, f"Take-Profit erreicht (+{gewinn_verlust_prozent*100:.2f}%) 🎯")
                 
-        else:
-            print("Aktie im Depot: Nein")
-            # Kaufsignal: Kurs liegt über dem Durchschnitt
-            if kurs > durchschnitt:
-                print("-> SIGNAL: Aufwärtstrend erkannt! Kaufe...")
-                kaufe_aktie(TICKER, STUECKZAHL, kurs)
+                # 2. Stop-Loss (-1%)
+                elif gewinn_verlust_prozent <= -STOP_LOSS_PROZENT:
+                    verkaufe_aktie(ticker, pos["menge"], kurs, f"Stop-Loss ausgelöst ({gewinn_verlust_prozent*100:.2f}%) 🛡️")
+                
+                # 3. Strategie-Verkauf
+                elif kurs < durchschnitt:
+                    verkaufe_aktie(ticker, pos["menge"], kurs, "Trendwende: Kurs unter Durchschnitt 📉")
+                    
+                else:
+                    print("-> Halte Position.")
+                    
             else:
-                print("-> Kein Kaufsignal. Bot wartet...")
+                print("Im Depot: Nein")
+                if kurs > durchschnitt:
+                    print(f"-> SIGNAL: Aufwärtstrend für {ticker} erkannt! Kaufe...")
+                    kaufe_aktie(ticker, STUECKZAHL, kurs)
+                else:
+                    print("-> Kein Kaufsignal.")
 
-    except Exception as e:
-        print(f"Fehler im Ablauf: {e}")
-        
+        except Exception as e:
+            print(f"Fehler bei {ticker}: {e}")
+            
     time.sleep(60)
