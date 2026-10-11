@@ -33,15 +33,21 @@ def sende_discord_nachricht(text):
         print(f"Fehler beim Senden der Discord-Nachricht: {e}")
 
 def hole_markt_daten(symbol):
-    """Holt Kurse und berechnet den 5-Tage-Durchschnitt."""
+    """Holt Kurse und berechnet den 5-Tage-Durchschnitt (funktioniert auch am Wochenende)."""
     aktie = yf.Ticker(symbol)
     historie = aktie.history(period="5d", interval="1m")
     
+    # Fallback falls Börse zu ist oder 1m-Daten leer sind
+    if historie.empty:
+        historie = aktie.history(period="5d", interval="1d")
+    
+    if historie.empty:
+        raise ValueError(f"Keine Daten für {symbol} empfangen.")
+        
     aktueller_kurs = historie['Close'].iloc[-1]
     durchschnitt_kurs = historie['Close'].mean()
     
     return aktueller_kurs, durchschnitt_kurs
-
 def hole_position_details(symbol):
     """Holt Details zur aktuellen Position (Kaufpreis, Menge)."""
     try:
