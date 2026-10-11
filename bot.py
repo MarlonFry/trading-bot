@@ -1,7 +1,8 @@
 import time
 import requests
-import yfinance as yf
 from alpaca.trading.client import TradingClient
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockLatestQuoteRequest
 from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 
@@ -10,9 +11,9 @@ API_KEY = "PKGH6S4LYZMDR3PPRVYKXA5UX6"
 SECRET_KEY = "BNpVQLSsp8LdRsMSi9Z3PzyUGYsRDfHeKhBU36Q37Mgu"
 
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1558899105349107712/CGbhVCnvDDZGuVRYwvdrCbXtZRMNcSHrRUrXUUO3Pp2vIhx1TeCfv9YciubAbjp4Ksf"
- 
 
 trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
+data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 
 # MULTI-AKTIEN WATCHLIST
 TICKERS = ["AAPL", "NVDA", "TSLA", "MSFT"]
@@ -32,22 +33,12 @@ def sende_discord_nachricht(text):
     except Exception as e:
         print(f"Fehler beim Senden der Discord-Nachricht: {e}")
 
-def hole_markt_daten(symbol):
-    """Holt Kurse und berechnet den 5-Tage-Durchschnitt (funktioniert auch am Wochenende)."""
-    aktie = yf.Ticker(symbol)
-    historie = aktie.history(period="5d", interval="1m")
-    
-    # Fallback falls Börse zu ist oder 1m-Daten leer sind
-    if historie.empty:
-        historie = aktie.history(period="5d", interval="1d")
-    
-    if historie.empty:
-        raise ValueError(f"Keine Daten für {symbol} empfangen.")
-        
-    aktueller_kurs = historie['Close'].iloc[-1]
-    durchschnitt_kurs = historie['Close'].mean()
-    
-    return aktueller_kurs, durchschnitt_kurs
+def hole_aktuellen_kurs(symbol):
+    """Holt den aktuellen Preis direkt über die Alpaca Data API."""
+    req = StockLatestQuoteRequest(symbol_or_symbols=symbol)
+    quote = data_client.get_stock_latest_quote(req)
+    return float(quote[symbol].ask_price or quote[symbol].bid_price)
+
 def hole_position_details(symbol):
     """Holt Details zur aktuellen Position (Kaufpreis, Menge)."""
     try:
@@ -95,10 +86,10 @@ while True:
     print(f"\n==================== Check um {time.strftime('%H:%M:%S')} ====================")
     for ticker in TICKERS:
         try:
-            kurs, durchschnitt = hole_markt_daten(ticker)
+            kurs = hole_aktuellen_kurs(ticker)
             pos = hole_position_details(ticker)
             
-            print(f"\n--- [{ticker}] Kurs: {kurs:.2f} USD | Schnitt: {durchschnitt:.2f} USD ---")
+            print(f"\n--- [{ticker}] Aktueller Kurs: {kurs:.2f} USD ---")
             
             if pos["im_besitz"]:
                 kaufpreis = pos["kaufpreis"]
@@ -113,20 +104,12 @@ while True:
                 elif gewinn_verlust_prozent <= -STOP_LOSS_PROZENT:
                     verkaufe_aktie(ticker, pos["menge"], kurs, f"Stop-Loss ausgelöst ({gewinn_verlust_prozent*100:.2f}%) 🛡️")
                 
-                # 3. Strategie-Verkauf
-                elif kurs < durchschnitt:
-                    verkaufe_aktie(ticker, pos["menge"], kurs, "Trendwende: Kurs unter Durchschnitt 📉")
-                    
                 else:
                     print("-> Halte Position.")
                     
             else:
                 print("Im Depot: Nein")
-                if kurs > durchschnitt:
-                    print(f"-> SIGNAL: Aufwärtstrend für {ticker} erkannt! Kaufe...")
-                    kaufe_aktie(ticker, STUECKZAHL, kurs)
-                else:
-                    print("-> Kein Kaufsignal.")
+                print(f"-> Überwache {ticker} auf Signale.")
 
         except Exception as e:
             print(f"Fehler bei {ticker}: {e}")
