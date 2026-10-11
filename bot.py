@@ -9,8 +9,8 @@ from alpaca.trading.enums import OrderSide, TimeInForce
 API_KEY = "PKGH6S4LYZMDR3PPRVYKXA5UX6"
 SECRET_KEY = "BNpVQLSsp8LdRsMSi9Z3PzyUGYsRDfHeKhBU36Q37Mgu"
 
-# HIER DEINE DISCORD WEBHOOK URL EINFÜGEN (falls vorhanden):
-DISCORD_WEBHOOK_URL = "" 
+DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1558899105349107712/CGbhVCnvDDZGuVRYwvdrCbXtZRMNcSHrRUrXUUO3Pp2vIhx1TeCfv9YciubAbjp4Ksf"
+ 
 
 trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
 
