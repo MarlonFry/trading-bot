@@ -11,7 +11,7 @@ from alpaca.trading.enums import OrderSide, TimeInForce
 API_KEY = "PKGH6S4LYZMDR3PPRVYKXA5UX6"
 SECRET_KEY = "BNpVQLSsp8LdRsMSi9Z3PzyUGYsRDfHeKhBU36Q37Mgu"
 
-DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1558899105349107712/CGbhVCnvDDZGuVRYwvdrCbXtZRMNcSHrRUrXUUO3Pp2vIhx1TeCfv9YciubAbjp4Ksf"
+DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1558899094049529897/EJdXKEhYb50vap9DtcIPC4I6mEHxVNy3oSCrNlkqVvC1nuf1CuAxAEbQ2E2XYCpj3qXG"
 
 trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
 data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
