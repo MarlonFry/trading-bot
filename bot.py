@@ -1,3 +1,4 @@
+
 import time
 import requests
 from alpaca.trading.client import TradingClient
@@ -80,7 +81,7 @@ def verkaufe_aktie(symbol, menge, kurs, grund):
 
 # Haupt-Schleife
 print(f"=== STARTE MULTI-TICKER TRADING BOT FÜR {TICKERS} ===")
-sende_discord_nachricht(f"🚀 Bot gestartet für **{', '.join(TICKERS)}** mit Take-Profit (+{TAKE_PROFIT_PROZENT*100}%) & Stop-Loss (-{STOP_LOSS_PROZENT*100}%).")
+sende_discord_nachricht(f"🚀 Bot gestartet! Überwache **{', '.join(TICKERS)}** mit Take-Profit (+{TAKE_PROFIT_PROZENT*100:.0f}%) & Stop-Loss (-{STOP_LOSS_PROZENT*100:.0f}%).")
 
 while True:
     print(f"\n==================== Check um {time.strftime('%H:%M:%S')} ====================")
@@ -109,7 +110,8 @@ while True:
                     
             else:
                 print("Im Depot: Nein")
-                print(f"-> Überwache {ticker} auf Signale.")
+                print(f"-> Automatischer Kauf-Check für {ticker}...")
+                kaufe_aktie(ticker, STUECKZAHL, kurs)
 
         except Exception as e:
             print(f"Fehler bei {ticker}: {e}")
