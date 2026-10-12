@@ -144,6 +144,8 @@ def notify(message: str) -> None:
         r.raise_for_status()
     except requests.RequestException as exc:
         logger.error("Telegram-Fehler: %s", exc)
+
+
 POLL_SECONDS = 60
 POLL_SECONDS_CLOSED = 300
 MAX_BAR_LAG_MINUTES = 30       # Daten dürfen max. so alt sein (Ende der letzten fertigen Kerze)
