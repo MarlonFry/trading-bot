@@ -3,15 +3,15 @@ import requests
 from alpaca.trading.client import TradingClient
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockLatestQuoteRequest
-from alpaca.trading.requests import MarketOrderRequest
-from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
+from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
 
 # 1. Zugangsdaten & Einstellungen
 API_KEY = "PKGH6S4LYZMDR3PPRVYKXA5UX6"
 SECRET_KEY = "BNpVQLSsp8LdRsMSi9Z3PzyUGYsRDfHeKhBU36Q37Mgu"
 
-# Proxy-Domain umgeht den Cloudflare-1015-Block von PythonAnywhere zu Discord
-DISCORD_WEBHOOK_URL = "https://discordapp.com/api/webhooks/1558899094049529897/EJdXKEhyB50vap9DtcIPC4I6mEHxVNy3oSCrN1kqVvC1nuf1CuAxAEbQ2E2XYCpj3qXG".replace("discord.com", "webhook.leone.dev")
+# Saubere Discord-URL ohne Proxy-Dienste
+DISCORD_WEBHOOK_URL = "https://discordapp.com/api/webhooks/1558899094049529897/EJdXKEhyB50vap9DtcIPC4I6mEHxVNy3oSCrN1kqVvC1nuf1CuAxAEbQ2E2XYCpj3qXG"
 
 trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
 data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
@@ -39,6 +39,15 @@ def hole_aktuellen_kurs(symbol):
     req = StockLatestQuoteRequest(symbol_or_symbols=symbol)
     quote = data_client.get_stock_latest_quote(req)
     return float(quote[symbol].ask_price or quote[symbol].bid_price)
+
+def hat_offene_order(symbol):
+    """Prüft, ob für dieses Symbol bereits eine nicht ausgeführte Kauf-Order vorliegt."""
+    try:
+        req = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol])
+        orders = trading_client.get_orders(filter=req)
+        return len(orders) > 0
+    except Exception:
+        return False
 
 def hole_position_details(symbol):
     """Holt Details zur aktuellen Position direkt von Alpaca."""
@@ -88,6 +97,7 @@ while True:
         try:
             kurs = hole_aktuellen_kurs(ticker)
             pos = hole_position_details(ticker)
+            order_offen = hat_offene_order(ticker)
             
             print(f"\n--- [{ticker}] Aktueller Kurs: {kurs:.2f} USD ---")
             
@@ -107,6 +117,9 @@ while True:
                 else:
                     print("-> Halte Position. Warten auf TP/SL Signal.")
                     
+            elif order_offen:
+                print("Im Depot: Nein | Kauf-Order bereits in Bearbeitung -> Warte auf Ausführung.")
+
             else:
                 print("Im Depot: Nein -> Erstkauf wird ausgeführt...")
                 kaufe_aktie(ticker, STUECKZAHL, kurs)
