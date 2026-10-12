@@ -482,13 +482,16 @@ def submit_entry(symbol: str, qty: int, price: float, atr: float, bar_time: pd.T
         logger.warning("%s: Ungültige Stop/Ziel-Level (%.2f/%.2f) - übersprungen.", symbol, stop, target)
         return False
 
+    kauf_zeit = ny_now().strftime("%d.%m.%Y um %H:%M Uhr")
+
     msg = (
-        f"🟢 **KAUF {symbol}**\n"
-        f"• Menge: {qty} Stück\n"
-        f"• Einstiegskurs: ~${price:.2f}\n"
-        f"• Stop-Loss: ${stop:.2f}\n"
-        f"• Gewinnziel: ${target:.2f}\n"
-        f"• Signal-Score: {score:.0f}/100"
+        f"🟢 **GEKAUFT: {symbol}**\n"
+        f"🕒 **Zeitpunkt:** {kauf_zeit}\n"
+        f"• **Menge:** {qty} Stück\n"
+        f"• **Kaufpreis:** ${price:.2f}\n"
+        f"• **Stop-Loss:** ${stop:.2f}\n"
+        f"• **Zielpreis:** ${target:.2f}\n"
+        f"• **Signal-Score:** {score:.0f}/100"
     )
     if DRY_RUN:
         logger.info("[TEST-MODUS] %s", msg)
@@ -544,7 +547,7 @@ def flatten(symbol: str, reason: str, open_orders: list, last_price: float | Non
         if symbol in state.trades and last_price:
             state.trades[symbol]["exit_hint"] = last_price
             state.save()
-        notify(f"🔴 **VERKAUF {symbol}**\n• Grund: {reason}")
+        notify(f"🔴 **VERKAUFT {symbol}**\n• Grund: {reason}")
     except Exception:
         logger.exception("%s: Schließen fehlgeschlagen.", symbol)
 
@@ -601,19 +604,32 @@ def reconcile_trades(positions: dict, open_orders: list) -> None:
             state.save()
             continue
 
+        verkauf_zeit = ny_now().strftime("%d.%m.%Y um %H:%M Uhr")
         state.data["cooldown"][symbol] = datetime.now(timezone.utc).isoformat()
+
         if exit_price and entry and trade["risk"] > 0:
             r = (exit_price - entry) / trade["risk"]
             pnl = (exit_price - entry) * trade["qty"]
             state.record_result(r)
-            icon = "✅" if pnl > 0 else "❌"
+
+            # GRÜN bei Gewinn / ROT bei Verlust
+            if pnl >= 0:
+                header = f"🟢 **VERKAUFT MIT GEWINN: {symbol}**"
+                pnl_str = f"🟩 **Gewinn:** +${pnl:.2f} (+{r:.2f}R)"
+            else:
+                header = f"🔴 **VERKAUFT MIT VERLUST: {symbol}**"
+                pnl_str = f"🟥 **Verlust:** -${abs(pnl):.2f} ({r:.2f}R)"
+
             notify(
-                f"{icon} **Trade beendet ({symbol})**\n"
-                f"• Ergebnis: {r:+.2f}R ({pnl:+.2f} $)\n"
-                f"• Aktuelle Verlustserie: {state.stats['consecutive_losses']}"
+                f"{header}\n"
+                f"🕒 **Zeitpunkt:** {verkauf_zeit}\n"
+                f"• **Kaufpreis:** ${entry:.2f}\n"
+                f"• **Verkaufspreis:** ${exit_price:.2f}\n"
+                f"• {pnl_str}\n"
+                f"• **Verlustserie:** {state.stats['consecutive_losses']}"
             )
         else:
-            notify(f"ℹ️ **{symbol}** beendet (Ergebnis nicht eindeutig ermittelbar).")
+            notify(f"ℹ️ **{symbol}** beendet am {verkauf_zeit} (Ergebnis nicht eindeutig ermittelbar).")
         state.save()
 
 
