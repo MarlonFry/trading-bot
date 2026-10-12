@@ -1,26 +1,11 @@
 """
-Smart Trading Bot v2 (Alpaca, standardmäßig Paper-Trading)
-
-Neu gegenüber v1:
-  * Keine Zugangsdaten mehr im Code (Umgebungsvariablen / .env)
-  * Server-seitige Bracket-Orders (Stop + Ziel liegen bei Alpaca, nicht im Bot)
-  * Multi-Timeframe-Signal: Tagestrend + Marktregime (SPY) + 15-Minuten-Pullback
-  * Signal-Ranking: bei mehreren Kandidaten wird der beste zuerst gekauft
-  * Breakeven-Stop und Trailing-Stop, Zeit-Exit, Cooldown nach Ausstieg
-  * Risikoschalter: Tagesverlust, Max-Drawdown (Kill-Switch), Verlustserien-Drossel
-  * Backtester, der exakt dieselbe Signallogik nutzt:  python trading_bot.py --backtest
-  * Fehlerbehebung: v1 hat mit limit=250 die ÄLTESTEN Kerzen geladen und kam deshalb
-    fast nie über den Aktualitäts-Check; außerdem wurde der Zustand beim Tageswechsel
-    gelöscht (inkl. Stop-Leveln) und der Datenfeed war nicht auf IEX gestellt.
+Smart Trading Bot v2 (Alpaca, standardmäßig Paper-Trading & Telegram)
 
 Start:
     pip install alpaca-py pandas numpy requests python-dotenv tzdata
-    export ALPACA_API_KEY=...   ALPACA_SECRET_KEY=...   DISCORD_WEBHOOK_URL=...
-    python trading_bot.py --backtest --days 120
-    python trading_bot.py --dry-run          # nur loggen, keine Orders
-    python trading_bot.py                    # Paper-Trading
-
-Keine Gewinngarantie. Erst Backtest + Paper-Trading, dann ggf. kleiner Echtgeld-Einsatz.
+    python bot.py --backtest --days 120
+    python bot.py --dry-run          # nur loggen, keine Orders
+    python bot.py                    # Paper-Trading
 """
 from __future__ import annotations
 
@@ -122,29 +107,9 @@ LOSS_STREAK_THROTTLE = 3       # nach 3 Verlusten in Folge ...
 LOSS_STREAK_RISK_FACTOR = 0.5  # ... nur halbes Risiko, bis wieder ein Gewinn kommt
 MIN_ORDER_VALUE = 50.0
 
-# ============================================================
-# 2. BENACHRICHTIGUNGEN (TELEGRAM)
-# ============================================================
-
-TELEGRAM_BOT_TOKEN = "8661524937:AAF8MQkKVggFYDiFQrYTyjxQLG4zLBVam2Q"
-TELEGRAM_CHAT_ID = "8859741833"
-
-def notify(message: str) -> None:
-    logger.info(message)
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": f"🤖 **Smart Bot**\n{message}",
-            "parse_mode": "Markdown"
-        }
-        r = http.post(url, json=payload, timeout=10)
-        r.raise_for_status()
-    except requests.RequestException as exc:
-        logger.error("Telegram-Fehler: %s", exc)
-
+# --- Benachrichtigungen (Telegram) ---
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or "8661524937:AAF8MQkKVggFYDiFQrYTyjxQLG4zLBVam2Q"
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or "8859741833"
 
 POLL_SECONDS = 60
 POLL_SECONDS_CLOSED = 300
@@ -183,34 +148,32 @@ data_client = None
 DRY_RUN = False
 http = requests.Session()
 
-# Webhook-URL fest hinterlegt
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL") or "https://discordapp.com/api/webhooks/1559227552218878103/RmDOyen4Bc3UNhnIKxRMtCKNbdtk13t3iTEfx21wtMHBwkQW951EmRwmPO2U1nN9dIg9"
-
 
 def notify(message: str) -> None:
     logger.info(message)
-    if not DISCORD_WEBHOOK_URL:
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
     try:
-        r = http.post(
-            DISCORD_WEBHOOK_URL,
-            json={"content": f"🤖 **Smart Bot**\n{message}"[:1900]},
-            timeout=10,
-        )
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": f"🤖 **Smart Bot**\n{message}",
+            "parse_mode": "Markdown",
+        }
+        r = http.post(url, json=payload, timeout=10)
         r.raise_for_status()
     except requests.RequestException as exc:
-        logger.error("Discord-Fehler: %s", exc)
+        logger.error("Telegram-Fehler: %s", exc)
 
 
 def init_clients() -> None:
     global trading_client, data_client
     if not ALPACA_OK:
         sys.exit(f"alpaca-py fehlt: {ALPACA_ERR}\nInstallation: pip install alpaca-py")
-    
-    # Zugangsdaten fest hinterlegt als Fallback
+
     key = os.getenv("ALPACA_API_KEY") or "PKNPBIXR7TIVOYWUONFKDOEGF4"
     secret = os.getenv("ALPACA_SECRET_KEY") or "9JqMriM1LHLsae3MppsBY97PHmWMhHEnHpQBzMvEgFeC"
-    
+
     if not key or not secret:
         sys.exit("ALPACA_API_KEY / ALPACA_SECRET_KEY fehlen (Umgebungsvariablen oder .env).")
     paper = os.getenv("BOT_PAPER", "1") != "0"
@@ -568,8 +531,7 @@ def submit_entry(symbol: str, qty: int, price: float, atr: float, bar_time: pd.T
 
 
 def flatten(symbol: str, reason: str, open_orders: list, last_price: float | None = None) -> None:
-    """Offene Orders (Stop/Ziel) stornieren, dann Position schließen. Ohne das Stornieren
-    lehnt Alpaca das Schließen ab, weil die Aktien durch die Stop-Order gebunden sind."""
+    """Offene Orders (Stop/Ziel) stornieren, dann Position schließen."""
     if DRY_RUN:
         logger.info("[DRY-RUN] Würde %s schließen: %s", symbol, reason)
         return
@@ -649,8 +611,10 @@ def reconcile_trades(positions: dict, open_orders: list) -> None:
             pnl = (exit_price - entry) * trade["qty"]
             state.record_result(r)
             icon = "✅" if pnl > 0 else "❌"
-            notify(f"{icon} {symbol} beendet: {r:+.2f}R ({pnl:+.2f} $) | Serie Verluste: "
-                   f"{state.stats['consecutive_losses']}")
+            notify(
+                f"{icon} {symbol} beendet: {r:+.2f}R ({pnl:+.2f} $) | Serie Verluste: "
+                f"{state.stats['consecutive_losses']}"
+            )
         else:
             notify(f"ℹ️ {symbol} beendet (Ergebnis nicht ermittelbar).")
         state.save()
@@ -672,8 +636,10 @@ def manage_positions(positions: dict, open_orders: list) -> None:
 
             entry, risk, stop = trade["entry"], trade["risk"], trade["stop"]
             r_mult = (price - entry) / risk
-            logger.info("%s | Einstieg %.2f | Jetzt %.2f | %+.2fR | Stop %.2f | Ziel %.2f",
-                        symbol, entry, price, r_mult, stop, trade["target"])
+            logger.info(
+                "%s | Einstieg %.2f | Jetzt %.2f | %+.2fR | Stop %.2f | Ziel %.2f",
+                symbol, entry, price, r_mult, stop, trade["target"],
+            )
 
             # Sicherheitsnetz: Stop wurde unterschritten, Position besteht aber noch
             if price <= stop * 0.998:
@@ -809,8 +775,10 @@ def run_cycle() -> int:
     positions = get_positions()
     manage_positions(positions, open_orders)
 
-    logger.info("Eigenkapital=$%.2f | Tag %+.2f%% | DD %.2f%% | Positionen=%d | Markt=%s",
-                equity, daily_ret * 100, drawdown * 100, len(positions), "offen" if clock.is_open else "zu")
+    logger.info(
+        "Eigenkapital=$%.2f | Tag %+.2f%% | DD %.2f%% | Positionen=%d | Markt=%s",
+        equity, daily_ret * 100, drawdown * 100, len(positions), "offen" if clock.is_open else "zu",
+    )
 
     if not clock.is_open:
         maybe_daily_summary(account, daily_ret, drawdown)
@@ -864,9 +832,6 @@ def simulate(
     capital: float = STARTING_CAPITAL,
     slippage_bps: float = SLIPPAGE_BPS,
 ) -> dict:
-    """Ereignisgesteuerte Simulation über alle Symbole.
-    Signal am Kerzenende -> Einstieg zur Eröffnung der nächsten Kerze.
-    Trifft eine Kerze Stop UND Ziel, gilt pessimistisch der Stop."""
     slip = slippage_bps / 10_000
     rows = {
         sym: {
@@ -1009,7 +974,7 @@ def run_backtest(days: int) -> None:
         sig = sig[sig.index >= cutoff]
         if sig.empty:
             continue
-        frames[sym] = sig
+        frames[sig] = sig
         bench.append(sig["close"].iloc[-1] / sig["close"].iloc[0] - 1)
     if not frames:
         sys.exit("Keine Daten für den Backtest.")
@@ -1025,7 +990,6 @@ def run_backtest(days: int) -> None:
     print(f"Rendite:        {res.get('total_return', 0):+.2%}")
     print(f"Max. Drawdown:  {res.get('max_drawdown', 0):.2%}")
     print(f"Buy&Hold (Ø gleichgewichtet): {np.mean(bench):+.2%}")
-    print("Hinweis: wenige Trades = kaum aussagekräftig. Backtests überschätzen Live-Ergebnisse.")
 
 
 # ============================================================
@@ -1041,7 +1005,6 @@ if __name__ == "__main__":
 
     DRY_RUN = args.dry_run
     if args.backtest:
-        DISCORD_WEBHOOK_URL = ""
         run_backtest(args.days)
     else:
         live_main()
