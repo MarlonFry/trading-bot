@@ -20,8 +20,9 @@ TICKERS = ["AAPL", "NVDA", "TSLA", "MSFT"]
 STUECKZAHL = 1
 
 # Strategie & Risiko-Management Einstellungen
-TAKE_PROFIT_PROZENT = 0.02   # 2% Gewinnziel -> Automatisch verkaufen
-STOP_LOSS_PROZENT = 0.01     # 1% Verlustgrenze -> Automatisch verkaufen
+# Strategie & Risiko-Management Einstellungen
+TAKE_PROFIT_PROZENT = 0.04   # 4% Gewinnziel (4,00 € bei 100 €)
+STOP_LOSS_PROZENT = 0.02     # 2% Verlustgrenze (2,00 € bei 100 €)
 
 def sende_discord_nachricht(text):
     """Sendet eine Push-Benachrichtigung an deinen Discord-Kanal."""
