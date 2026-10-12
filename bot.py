@@ -122,7 +122,28 @@ LOSS_STREAK_THROTTLE = 3       # nach 3 Verlusten in Folge ...
 LOSS_STREAK_RISK_FACTOR = 0.5  # ... nur halbes Risiko, bis wieder ein Gewinn kommt
 MIN_ORDER_VALUE = 50.0
 
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL") or "https://discord.com/api/webhooks/1559306071175205014/rh5FvK01Fu4PXX-YyAYlzR0udVPSRSDr7GcpadhP8SXqd4_NYtRT8B0j0OYZIUAelF71"
+# ============================================================
+# 2. BENACHRICHTIGUNGEN (TELEGRAM)
+# ============================================================
+
+TELEGRAM_BOT_TOKEN = "8661524937:AAF8MQkKVggFYDiFQrYTyjxQLG4zLBVam2Q"
+TELEGRAM_CHAT_ID = "8859741833"
+
+def notify(message: str) -> None:
+    logger.info(message)
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": f"🤖 **Smart Bot**\n{message}",
+            "parse_mode": "Markdown"
+        }
+        r = http.post(url, json=payload, timeout=10)
+        r.raise_for_status()
+    except requests.RequestException as exc:
+        logger.error("Telegram-Fehler: %s", exc)
 POLL_SECONDS = 60
 POLL_SECONDS_CLOSED = 300
 MAX_BAR_LAG_MINUTES = 30       # Daten dürfen max. so alt sein (Ende der letzten fertigen Kerze)
