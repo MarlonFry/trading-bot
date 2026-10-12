@@ -8,11 +8,13 @@ from alpaca.data.timeframe import TimeFrame
 from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 
-# 1. Zugangsdaten & Einstellungen
-API_KEY = "PKGH6S4LYZMDR3PPRVYKXA5UX6"
-SECRET_KEY = "DEIN_SECRET_KEY_HIER"  # Bitte mit deinem echten Secret Key ersetzen!
 
-DISCORD_WEBHOOK_URL = "https://discordapp.com/api/webhooks/1559227552218878103/RmDOyen4Bc3UNhnIKxRMtCKNbdtk13t3iTEfx21wtMHBwkQW951EmRwmPO2U1nN9dIg9"
+API_KEY = "PKNPBIXR7TIVOYWUONFKDOEGF4"
+SECRET_KEY = "9JqMriM1LHLsae3MppsBY97PHmWMhHEnHpQBzMvEgFeC"
+
+DISCORD_WEBHOOK_URL = "https://discordapp.com/api/webhooks/1559227552218878103/RmDOyen4Bc3UNhnIKxRMtCKNbdtk13t3iTEfx21wtMHBw..."
+
+
 
 trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
 data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
