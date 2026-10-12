@@ -1,10 +1,10 @@
 """
-Smart Trading Bot v2 (Alpaca, standardmäßig Paper-Trading & Telegram)
+Smart Trading Bot v2 (Alpaca, Paper-Trading & Telegram-Benachrichtigungen auf Deutsch)
 
 Start:
     pip install alpaca-py pandas numpy requests python-dotenv tzdata
     python bot.py --backtest --days 120
-    python bot.py --dry-run          # nur loggen, keine Orders
+    python bot.py --dry-run          # nur loggen, keine echten Orders
     python bot.py                    # Paper-Trading
 """
 from __future__ import annotations
@@ -48,7 +48,7 @@ try:
 
     ALPACA_OK = True
     ALPACA_ERR: Exception | None = None
-except ImportError as _exc:  # Backtest-Logik und Tests laufen auch ohne alpaca-py
+except ImportError as _exc:  # Backtest-Logik läuft auch ohne alpaca-py
     ALPACA_OK = False
     ALPACA_ERR = _exc
 
@@ -157,7 +157,7 @@ def notify(message: str) -> None:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         payload = {
             "chat_id": TELEGRAM_CHAT_ID,
-            "text": f"🤖 **Smart Bot**\n{message}",
+            "text": f"🤖 **Smart Trading Bot**\n{message}",
             "parse_mode": "Markdown",
         }
         r = http.post(url, json=payload, timeout=10)
@@ -175,7 +175,7 @@ def init_clients() -> None:
     secret = os.getenv("ALPACA_SECRET_KEY") or "9JqMriM1LHLsae3MppsBY97PHmWMhHEnHpQBzMvEgFeC"
 
     if not key or not secret:
-        sys.exit("ALPACA_API_KEY / ALPACA_SECRET_KEY fehlen (Umgebungsvariablen oder .env).")
+        sys.exit("ALPACA_API_KEY / ALPACA_SECRET_KEY fehlen.")
     paper = os.getenv("BOT_PAPER", "1") != "0"
     if not paper and os.getenv("BOT_CONFIRM_LIVE") != "YES":
         sys.exit("Live-Modus verlangt zusätzlich BOT_CONFIRM_LIVE=YES.")
@@ -258,7 +258,7 @@ class BotState:
 
         if daily_ret <= -MAX_DAILY_LOSS and not day["halted"]:
             day["halted"] = True
-            notify(f"🛑 Tagesverlustlimit erreicht ({daily_ret:.2%}). Keine neuen Käufe heute.")
+            notify(f"🛑 **Tagesverlustlimit erreicht** ({daily_ret:.2%}). Heute werden keine neuen Käufe mehr getätigt.")
 
         self.data["peak_equity"] = max(self.data["peak_equity"], equity)
         drawdown = equity / self.data["peak_equity"] - 1
@@ -266,8 +266,8 @@ class BotState:
             self.data["kill_switch"] = True
             self.data["kill_reason"] = f"Drawdown {drawdown:.2%}"
             notify(
-                f"🚨 KILL-SWITCH: Drawdown {drawdown:.2%} vom Höchststand. Keine neuen Käufe, "
-                f"bis du in {STATE_FILE} 'kill_switch' manuell auf false setzt."
+                f"🚨 **KILL-SWITCH AKTIVIERT**: Maximaler Rücksetzer von {drawdown:.2%} erreicht. "
+                f"Der Bot kauft erst wieder, wenn der Kill-Switch manuell zurückgesetzt wird."
             )
         self.save()
         return daily_ret, drawdown
@@ -277,7 +277,7 @@ state = BotState(STATE_FILE)
 
 
 # ============================================================
-# 4. INDIKATOREN UND SIGNALLOGIK (rein, ohne API -> testbar)
+# 4. INDIKATOREN UND SIGNALLOGIK
 # ============================================================
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -310,14 +310,12 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def regular_hours(df: pd.DataFrame) -> pd.DataFrame:
-    """Nur reguläre Handelszeit (Vor-/Nachbörse hat dünne, verzerrte Kerzen)."""
     ny = pd.DatetimeIndex(df.index).tz_convert(NY_TZ)
     start_min = ny.hour * 60 + ny.minute
     return df[(start_min >= SESSION_OPEN) & (start_min < SESSION_CLOSE)]
 
 
 def daily_context(daily: pd.DataFrame) -> pd.DataFrame:
-    """Tages-Trendfilter je Handelstag: trend_ok (Aktie) und regime_ok (für SPY)."""
     d = daily.sort_index()
     idx = pd.DatetimeIndex(d.index)
     if idx.tz is None:
@@ -339,8 +337,6 @@ def daily_context(daily: pd.DataFrame) -> pd.DataFrame:
 
 
 def attach_context(index: pd.Index, ctx: pd.DataFrame | None, col: str) -> np.ndarray:
-    """Ordnet jeder Intraday-Kerze den Kontext des LETZTEN ABGESCHLOSSENEN Tages zu
-    (kein Blick in die Zukunft: exakter Tages-Match ist ausgeschlossen)."""
     if ctx is None or ctx.empty:
         return np.zeros(len(index), dtype=bool)
     days = pd.DatetimeIndex(index).tz_convert(NY_TZ).tz_localize(None).normalize()
@@ -354,8 +350,6 @@ def attach_context(index: pd.Index, ctx: pd.DataFrame | None, col: str) -> np.nd
 def build_signals(
     df15: pd.DataFrame, ctx_symbol: pd.DataFrame | None, ctx_regime: pd.DataFrame | None
 ) -> pd.DataFrame:
-    """Berechnet je Kerze: signal (bool) und score (0-100). Wird live (letzte Zeile)
-    und im Backtest (alle Zeilen) identisch verwendet."""
     df = add_indicators(df15)
     df["trend_ok"] = attach_context(df.index, ctx_symbol, "trend_ok")
     df["regime_ok"] = attach_context(df.index, ctx_regime, "regime_ok")
@@ -412,7 +406,7 @@ def fetch_bars(symbols: list[str], timeframe, start: datetime) -> dict[str, pd.D
         symbol_or_symbols=list(symbols),
         timeframe=timeframe,
         start=start,
-        adjustment=Adjustment.ALL,   # Splits/Dividenden bereinigt
+        adjustment=Adjustment.ALL,
         feed=feed,
     )
     raw = data_client.get_stock_bars(req).df
@@ -489,22 +483,26 @@ def submit_entry(symbol: str, qty: int, price: float, atr: float, bar_time: pd.T
         return False
 
     msg = (
-        f"🟢 BUY {symbol}: {qty} Stk @ ~${price:.2f} | Stop ${stop:.2f} | "
-        f"Ziel ${target:.2f} | Score {score:.0f}"
+        f"🟢 **KAUF {symbol}**\n"
+        f"• Menge: {qty} Stück\n"
+        f"• Einstiegskurs: ~${price:.2f}\n"
+        f"• Stop-Loss: ${stop:.2f}\n"
+        f"• Gewinnziel: ${target:.2f}\n"
+        f"• Signal-Score: {score:.0f}/100"
     )
     if DRY_RUN:
-        logger.info("[DRY-RUN] %s", msg)
+        logger.info("[TEST-MODUS] %s", msg)
         return False
 
     order = MarketOrderRequest(
         symbol=symbol,
         qty=qty,
         side=OrderSide.BUY,
-        time_in_force=TimeInForce.GTC,        # Stop/Ziel sollen über Nacht bestehen bleiben
+        time_in_force=TimeInForce.GTC,
         order_class=OrderClass.BRACKET,
         take_profit=TakeProfitRequest(limit_price=target),
         stop_loss=StopLossRequest(stop_price=stop),
-        client_order_id=f"smartbot-{symbol}-{int(bar_time.timestamp())}",  # verhindert Doppelkäufe
+        client_order_id=f"smartbot-{symbol}-{int(bar_time.timestamp())}",
     )
     try:
         submitted = trading_client.submit_order(order_data=order)
@@ -531,9 +529,8 @@ def submit_entry(symbol: str, qty: int, price: float, atr: float, bar_time: pd.T
 
 
 def flatten(symbol: str, reason: str, open_orders: list, last_price: float | None = None) -> None:
-    """Offene Orders (Stop/Ziel) stornieren, dann Position schließen."""
     if DRY_RUN:
-        logger.info("[DRY-RUN] Würde %s schließen: %s", symbol, reason)
+        logger.info("[TEST-MODUS] Würde %s schließen: %s", symbol, reason)
         return
     try:
         for o in open_orders:
@@ -547,18 +544,18 @@ def flatten(symbol: str, reason: str, open_orders: list, last_price: float | Non
         if symbol in state.trades and last_price:
             state.trades[symbol]["exit_hint"] = last_price
             state.save()
-        notify(f"🔴 SCHLIESSEN {symbol}: {reason}")
+        notify(f"🔴 **VERKAUF {symbol}**\n• Grund: {reason}")
     except Exception:
         logger.exception("%s: Schließen fehlgeschlagen.", symbol)
 
 
 def modify_stop(symbol: str, new_stop: float, open_orders: list) -> bool:
     if DRY_RUN:
-        logger.info("[DRY-RUN] Würde %s-Stop auf %.2f anheben.", symbol, new_stop)
+        logger.info("[TEST-MODUS] Würde %s-Stop auf %.2f anheben.", symbol, new_stop)
         return False
     order = find_stop_order(open_orders, symbol)
     if order is None:
-        logger.warning("%s: KEINE Stop-Order bei Alpaca gefunden - nur Software-Sicherheitsnetz aktiv!", symbol)
+        logger.warning("%s: Keine Stop-Order bei Alpaca gefunden.", symbol)
         return False
     try:
         trading_client.replace_order_by_id(order.id, ReplaceOrderRequest(stop_price=new_stop))
@@ -573,7 +570,6 @@ def modify_stop(symbol: str, new_stop: float, open_orders: list) -> bool:
 # ============================================================
 
 def reconcile_trades(positions: dict, open_orders: list) -> None:
-    """Findet abgeschlossene Trades, berechnet das Ergebnis in R und aktualisiert Statistik/Cooldown."""
     open_symbols = {o.symbol for o in open_orders}
     now = datetime.now(timezone.utc)
 
@@ -601,7 +597,7 @@ def reconcile_trades(positions: dict, open_orders: list) -> None:
 
         state.trades.pop(symbol, None)
         if not filled:
-            notify(f"⚪ {symbol}: Kauf-Order wurde nicht ausgeführt.")
+            notify(f"⚪ **{symbol}**: Kauf-Order wurde nicht ausgeführt.")
             state.save()
             continue
 
@@ -612,11 +608,12 @@ def reconcile_trades(positions: dict, open_orders: list) -> None:
             state.record_result(r)
             icon = "✅" if pnl > 0 else "❌"
             notify(
-                f"{icon} {symbol} beendet: {r:+.2f}R ({pnl:+.2f} $) | Serie Verluste: "
-                f"{state.stats['consecutive_losses']}"
+                f"{icon} **Trade beendet ({symbol})**\n"
+                f"• Ergebnis: {r:+.2f}R ({pnl:+.2f} $)\n"
+                f"• Aktuelle Verlustserie: {state.stats['consecutive_losses']}"
             )
         else:
-            notify(f"ℹ️ {symbol} beendet (Ergebnis nicht ermittelbar).")
+            notify(f"ℹ️ **{symbol}** beendet (Ergebnis nicht eindeutig ermittelbar).")
         state.save()
 
 
@@ -661,7 +658,7 @@ def manage_positions(positions: dict, open_orders: list) -> None:
             if desired >= stop + 0.01 and modify_stop(symbol, desired, open_orders):
                 trade["stop"] = desired
                 state.save()
-                notify(f"🔼 {symbol}: Stop auf ${desired:.2f} angehoben ({r_mult:+.2f}R)")
+                notify(f"🔼 **{symbol}**: Stop-Loss auf ${desired:.2f} angehoben ({r_mult:+.2f}R)")
         except Exception:
             logger.exception("%s: Fehler bei Positionsverwaltung.", symbol)
 
@@ -699,7 +696,7 @@ def scan_for_entries(clock, account, positions: dict, open_orders: list) -> None
                 logger.warning("%s: Keine Intraday-Daten.", symbol)
                 continue
             df = regular_hours(df)
-            df = df[df.index + timedelta(minutes=BAR_MINUTES) <= now]   # nur fertige Kerzen
+            df = df[df.index + timedelta(minutes=BAR_MINUTES) <= now]
             if len(df) < MIN_BARS:
                 logger.warning("%s: Zu wenige Kerzen (%d).", symbol, len(df))
                 continue
@@ -750,8 +747,12 @@ def maybe_daily_summary(account, daily_ret: float, drawdown: float) -> None:
     if now.weekday() < 5 and now.hour >= 16 and state.data["summary_date"] != today:
         s = state.stats
         notify(
-            f"📊 Tagesbericht: Eigenkapital ${float(account.equity):,.2f} | Tag {daily_ret:+.2%} | "
-            f"Drawdown {drawdown:.2%} | Trades {s['wins']}W/{s['losses']}L | Summe {s['total_r']:+.1f}R"
+            f"📊 **Tagesbericht**\n"
+            f"• Kontostand: ${float(account.equity):,.2f}\n"
+            f"• Tagesrendite: {daily_ret:+.2%}\n"
+            f"• Max. Rücksetzer: {drawdown:.2%}\n"
+            f"• Gesamt-Trades: {s['wins']} Gewinne / {s['losses']} Verluste\n"
+            f"• Kumulierte Performance: {s['total_r']:+.1f}R"
         )
         state.data["summary_date"] = today
         state.save()
@@ -803,7 +804,7 @@ def live_main() -> None:
         getattr(acct, "pattern_day_trader", False) or int(float(getattr(acct, "multiplier", 1) or 1)) > 1
     ):
         logger.warning("Konto < 25.000 $ mit Margin: Die Pattern-Day-Trader-Regel kann Trades blockieren.")
-    notify(f"Bot gestartet{' (DRY-RUN)' if DRY_RUN else ''}. Watchlist={', '.join(TICKERS)}")
+    notify(f"🚀 **Bot gestartet**{' (Test-Modus)' if DRY_RUN else ''}\nBeobachte: {', '.join(TICKERS)}")
 
     errors = 0
     try:
@@ -816,15 +817,15 @@ def live_main() -> None:
                 errors += 1
                 logger.exception("Fehler im Zyklus (Serie: %d).", errors)
                 if errors in (3, 10, 30):
-                    notify(f"⚠️ {errors} Fehler in Folge - bitte Log prüfen.")
+                    notify(f"⚠️ **Achtung**: {errors} Fehler in Folge - bitte Logs auf PythonAnywhere prüfen.")
                 sleep_for = min(POLL_SECONDS * 2 ** min(errors, 4), 600)
             time.sleep(sleep_for)
     except KeyboardInterrupt:
-        notify("Bot manuell gestoppt. Offene Positionen behalten ihre Stop-Orders bei Alpaca.")
+        notify("⏹️ **Bot manuell gestoppt**. Offene Positionen bleiben bei Alpaca abgesichert.")
 
 
 # ============================================================
-# 10. BACKTEST (gleiche Signallogik wie live)
+# 10. BACKTEST
 # ============================================================
 
 def simulate(
@@ -928,7 +929,7 @@ def simulate(
         prev_equity = equity
         curve.append((ts, equity))
 
-        # 3) neue Signale dieser Kerze (Ausführung bei der nächsten)
+        # 3) neue Signale dieser Kerze
         for sym in frames:
             row = rows[sym].get(ts)
             if row and row[5] and sym not in positions:
@@ -974,7 +975,7 @@ def run_backtest(days: int) -> None:
         sig = sig[sig.index >= cutoff]
         if sig.empty:
             continue
-        frames[sig] = sig
+        frames[sym] = sig
         bench.append(sig["close"].iloc[-1] / sig["close"].iloc[0] - 1)
     if not frames:
         sys.exit("Keine Daten für den Backtest.")
