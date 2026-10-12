@@ -10,8 +10,8 @@ from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
 API_KEY = "PKGH6S4LYZMDR3PPRVYKXA5UX6"
 SECRET_KEY = "BNpVQLSsp8LdRsMSi9Z3PzyUGYsRDfHeKhBU36Q37Mgu"
 
-# Saubere Discord-URL ohne Proxy-Dienste
-DISCORD_WEBHOOK_URL = "https://discordapp.com/api/webhooks/DEINE_NEUE_ID/DEIN_NEUER_TOKEN"
+DISCORD_WEBHOOK_URL = "https://discordapp.com/api/webhooks/1558899094049529897/DEIN_ECHTER_TOKEN"
+
 trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
 data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 
