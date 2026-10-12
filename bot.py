@@ -122,7 +122,7 @@ LOSS_STREAK_THROTTLE = 3       # nach 3 Verlusten in Folge ...
 LOSS_STREAK_RISK_FACTOR = 0.5  # ... nur halbes Risiko, bis wieder ein Gewinn kommt
 MIN_ORDER_VALUE = 50.0
 
-# --- Betrieb ---
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL") or "https://discord.com/api/webhooks/1559306071175205014/rh5FvK01Fu4PXX-YyAYlzR0udVPSRSDr7GcpadhP8SXqd4_NYtRT8B0j0OYZIUAelF71"
 POLL_SECONDS = 60
 POLL_SECONDS_CLOSED = 300
 MAX_BAR_LAG_MINUTES = 30       # Daten dürfen max. so alt sein (Ende der letzten fertigen Kerze)
