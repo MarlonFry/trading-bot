@@ -1,5 +1,5 @@
 """
-Smart Trading Bot v3 (Alpaca, VWAP, Dynamisches Risiko, Runner-Stop & Telegram-Retry)
+Smart Trading Bot v3.1 (Alpaca, VWAP, Dynamisches Risiko, Runner-Stop, Optimierte Parameter)
 """
 from __future__ import annotations
 
@@ -49,11 +49,9 @@ except ImportError as _exc:
 # 1. KONFIGURATION & TELEGRAM KEYS
 # ============================================================
 
-# --- Telegram Zugangsdaten (Zwingend ganz oben) ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or "8661524937:AAF8MQkKVggFYDiFQrYTyjxQLG4zLBVam2Q"
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or "8859741833"
 
-# --- Handelsparameter ---
 TICKERS = ["AAPL", "NVDA", "TSLA", "MSFT"]
 REGIME_SYMBOL = "SPY"
 
@@ -61,9 +59,9 @@ BAR_MINUTES = 15
 TF_INTRADAY = TimeFrame(BAR_MINUTES, TimeFrameUnit.Minute) if ALPACA_OK else None
 DATA_FEED_NAME = os.getenv("BOT_DATA_FEED", "iex").lower()
 
-# --- Einstiegsstrategie (15-Minuten-Kerzen) ---
+# --- Optimierte Einstiegsstrategie ---
 RSI_PERIOD = 14
-RSI_ENTRY_MAX = 40
+RSI_ENTRY_MAX = 48             # Auf 48 erhöht für frühere & mehr Einstiege
 RSI_ENTRY_CEIL = 55
 EMA_FAST = 20
 EMA_SLOW = 50
@@ -86,7 +84,7 @@ ENTRY_AFTER_OPEN_MIN = 30
 ENTRY_BEFORE_CLOSE_MIN = 30
 
 # --- Ausstieg ---
-ATR_STOP_MULTIPLIER = 1.5
+ATR_STOP_MULTIPLIER = 2.0      # Auf 2.0 erhöht für mehr Puffer bei Volatilität
 ATR_TARGET_MULTIPLIER = 4.5
 BREAKEVEN_R = 1.0
 TRAIL_START_R = 2.0
@@ -151,7 +149,6 @@ def notify(message: str) -> None:
         "text": f"🤖 **Smart Trading Bot**\n{message}",
         "parse_mode": "Markdown",
     }
-    # Automatisch bis zu 3 Versuche bei Proxy-Hickups auf PythonAnywhere
     for attempt in range(3):
         try:
             r = http.post(url, json=payload, timeout=10)
@@ -746,7 +743,7 @@ def run_cycle() -> int:
 
 def live_main() -> None:
     init_clients()
-    notify(f"🚀 **Bot gestartet** (VWAP-Version)\nBeobachte: {', '.join(TICKERS)}")
+    notify(f"🚀 **Bot gestartet** (v3.1 Optimiert)\nBeobachte: {', '.join(TICKERS)}")
 
     errors = 0
     try:
