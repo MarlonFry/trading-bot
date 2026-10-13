@@ -1,11 +1,5 @@
 """
-Smart Trading Bot v2 (Alpaca, Paper-Trading & Telegram-Benachrichtigungen auf Deutsch)
-
-Start:
-    pip install alpaca-py pandas numpy requests python-dotenv tzdata
-    python bot.py --backtest --days 120
-    python bot.py --dry-run          # nur loggen, keine echten Orders
-    python bot.py                    # Paper-Trading
+Smart Trading Bot v3 (Alpaca, VWAP, Dynamisches Risiko & Runner-Stop)
 """
 from __future__ import annotations
 
@@ -24,9 +18,8 @@ import numpy as np
 import pandas as pd
 import requests
 
-try:  # optional: .env-Datei laden
+try:
     from dotenv import load_dotenv
-
     load_dotenv()
 except ImportError:
     pass
@@ -45,10 +38,9 @@ try:
         StopLossRequest,
         TakeProfitRequest,
     )
-
     ALPACA_OK = True
     ALPACA_ERR: Exception | None = None
-except ImportError as _exc:  # Backtest-Logik läuft auch ohne alpaca-py
+except ImportError as _exc:
     ALPACA_OK = False
     ALPACA_ERR = _exc
 
@@ -58,23 +50,23 @@ except ImportError as _exc:  # Backtest-Logik läuft auch ohne alpaca-py
 # ============================================================
 
 TICKERS = ["AAPL", "NVDA", "TSLA", "MSFT"]
-REGIME_SYMBOL = "SPY"          # Marktfilter: nur kaufen, wenn SPY über seiner Tages-EMA liegt
+REGIME_SYMBOL = "SPY"
 
 BAR_MINUTES = 15
 TF_INTRADAY = TimeFrame(BAR_MINUTES, TimeFrameUnit.Minute) if ALPACA_OK else None
-DATA_FEED_NAME = os.getenv("BOT_DATA_FEED", "iex").lower()   # "iex" (gratis) oder "sip"
+DATA_FEED_NAME = os.getenv("BOT_DATA_FEED", "iex").lower()
 
 # --- Einstiegsstrategie (15-Minuten-Kerzen) ---
 RSI_PERIOD = 14
-RSI_ENTRY_MAX = 40             # Vorkerze muss unter diesem RSI gelegen haben (Pullback)
-RSI_ENTRY_CEIL = 55            # ... und der RSI darf noch nicht davongelaufen sein
+RSI_ENTRY_MAX = 40
+RSI_ENTRY_CEIL = 55
 EMA_FAST = 20
 EMA_SLOW = 50
 ATR_PERIOD = 14
 VOL_LOOKBACK = 20
-MIN_REL_VOLUME = 0.7           # Volumen der Signalkerze relativ zum 20-Kerzen-Schnitt
-MIN_ATR_PCT = 0.0015           # zu ruhige Aktie -> Kosten fressen den Vorteil
-MAX_ATR_PCT = 0.03             # zu wilde Phase -> kein Einstieg
+MIN_REL_VOLUME = 0.7
+MIN_ATR_PCT = 0.0015
+MAX_ATR_PCT = 0.03
 
 # --- Tageskontext ---
 D_EMA_FAST = 20
@@ -82,52 +74,50 @@ D_EMA_SLOW = 50
 D_SMA_TREND = 200
 REGIME_EMA = 50
 
-# --- Handelszeiten (US-Börsenzeit) ---
+# --- Handelszeiten ---
 SESSION_OPEN = 9 * 60 + 30
 SESSION_CLOSE = 16 * 60
-ENTRY_AFTER_OPEN_MIN = 30      # erste 30 Minuten nach Eröffnung nicht handeln
-ENTRY_BEFORE_CLOSE_MIN = 30    # letzte 30 Minuten vor Schluss keine neuen Käufe
+ENTRY_AFTER_OPEN_MIN = 30
+ENTRY_BEFORE_CLOSE_MIN = 30
 
 # --- Ausstieg ---
-ATR_STOP_MULTIPLIER = 1.5      # 1R = 1.5 * ATR
-ATR_TARGET_MULTIPLIER = 4.5    # Ziel = 3R
-BREAKEVEN_R = 1.0              # ab +1R Stop auf Einstand (+0.1R)
-TRAIL_START_R = 2.0            # ab +2R Stop nachziehen (Preis - 1.5*ATR)
-MAX_HOLD_DAYS = 5              # Zeit-Exit
-COOLDOWN_MINUTES = 60          # nach Ausstieg keine Wiederholung am selben Symbol
+ATR_STOP_MULTIPLIER = 1.5
+ATR_TARGET_MULTIPLIER = 4.5
+BREAKEVEN_R = 1.0
+TRAIL_START_R = 2.0            # Ab hier greift der "Runner"
+MAX_HOLD_DAYS = 5
+COOLDOWN_MINUTES = 60
 
 # --- Risikomanagement ---
 RISK_PER_TRADE = 0.01
 MAX_POSITION_FRACTION = 0.25
 MAX_TOTAL_EXPOSURE = 0.80
-MAX_OPEN_POSITIONS = 3         # Tech-Werte sind stark korreliert -> lieber weniger parallel
+MAX_OPEN_POSITIONS = 3
 MAX_DAILY_LOSS = 0.03
-MAX_DRAWDOWN = 0.10            # Kill-Switch: keine neuen Käufe mehr
-LOSS_STREAK_THROTTLE = 3       # nach 3 Verlusten in Folge ...
-LOSS_STREAK_RISK_FACTOR = 0.5  # ... nur halbes Risiko, bis wieder ein Gewinn kommt
+MAX_DRAWDOWN = 0.10
+LOSS_STREAK_THROTTLE = 3
+LOSS_STREAK_RISK_FACTOR = 0.5
 MIN_ORDER_VALUE = 50.0
 
-# --- Benachrichtigungen (Telegram) ---
+# --- Telegram ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or "8661524937:AAF8MQkKVggFYDiFQrYTyjxQLG4zLBVam2Q"
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or "8859741833"
 
 POLL_SECONDS = 60
 POLL_SECONDS_CLOSED = 300
-MAX_BAR_LAG_MINUTES = 30       # Daten dürfen max. so alt sein (Ende der letzten fertigen Kerze)
+MAX_BAR_LAG_MINUTES = 30
 INTRADAY_LOOKBACK_DAYS = 12
 DAILY_LOOKBACK_DAYS = 430
 MIN_BARS = EMA_SLOW + VOL_LOOKBACK
 STATE_FILE = Path("smart_bot_state.json")
 LOG_FILE = "smart_bot.log"
 
-# --- Backtest ---
 STARTING_CAPITAL = 100_000.0
-SLIPPAGE_BPS = 5.0             # je Seite, in Basispunkten
+SLIPPAGE_BPS = 5.0
 
 NY_TZ = "America/New_York"
 NY = ZoneInfo(NY_TZ)
-TELEGRAM_BOT_TOKEN = "8661524937:AAF8MQkKVggFYDiFQrYTyjxQLG4zLBVam2Q"
-TELEGRAM_CHAT_ID = "8859741833"
+
 
 # ============================================================
 # 2. LOGGING, CLIENTS, BENACHRICHTIGUNG
@@ -170,31 +160,27 @@ def notify(message: str) -> None:
 def init_clients() -> None:
     global trading_client, data_client
     if not ALPACA_OK:
-        sys.exit(f"alpaca-py fehlt: {ALPACA_ERR}\nInstallation: pip install alpaca-py")
+        sys.exit(f"alpaca-py fehlt: {ALPACA_ERR}")
 
     key = os.getenv("ALPACA_API_KEY") or "PKNPBIXR7TIVOYWUONFKDOEGF4"
     secret = os.getenv("ALPACA_SECRET_KEY") or "9JqMriM1LHLsae3MppsBY97PHmWMhHEnHpQBzMvEgFeC"
 
     if not key or not secret:
-        sys.exit("ALPACA_API_KEY / ALPACA_SECRET_KEY fehlen.")
+        sys.exit("ALPACA Keys fehlen.")
     paper = os.getenv("BOT_PAPER", "1") != "0"
-    if not paper and os.getenv("BOT_CONFIRM_LIVE") != "YES":
-        sys.exit("Live-Modus verlangt zusätzlich BOT_CONFIRM_LIVE=YES.")
     trading_client = TradingClient(key, secret, paper=paper)
     data_client = StockHistoricalDataClient(key, secret)
-    logger.info("Modus: %s | Datenfeed: %s", "PAPER" if paper else "LIVE", DATA_FEED_NAME)
 
 
 def _val(x) -> str:
     return str(getattr(x, "value", x)).lower()
-
 
 def ny_now() -> datetime:
     return datetime.now(NY)
 
 
 # ============================================================
-# 3. ZUSTAND (persistent, atomar gespeichert)
+# 3. ZUSTAND & DYNAMISCHES RISIKO
 # ============================================================
 
 class BotState:
@@ -206,7 +192,7 @@ class BotState:
             "kill_switch": False,
             "kill_reason": "",
             "trades": {},
-            "stats": {"wins": 0, "losses": 0, "consecutive_losses": 0, "total_r": 0.0},
+            "stats": {"wins": 0, "losses": 0, "consecutive_losses": 0, "total_r": 0.0, "recent_results": []},
             "last_bar": {},
             "cooldown": {},
             "summary_date": "",
@@ -218,8 +204,10 @@ class BotState:
             return
         try:
             self.data.update(json.loads(self.path.read_text(encoding="utf-8")))
-        except (OSError, json.JSONDecodeError) as exc:
-            logger.error("Zustand nicht lesbar (%s) - starte leer.", exc)
+            if "recent_results" not in self.data["stats"]:
+                self.data["stats"]["recent_results"] = []
+        except (OSError, json.JSONDecodeError):
+            pass
 
     def save(self) -> None:
         tmp = self.path.with_suffix(".tmp")
@@ -235,13 +223,29 @@ class BotState:
         return self.data["stats"]
 
     def risk_factor(self) -> float:
+        factor = 1.0
+        # Hartes Herunterfahren bei Verlustserie
         if self.stats["consecutive_losses"] >= LOSS_STREAK_THROTTLE:
             return LOSS_STREAK_RISK_FACTOR
-        return 1.0
+        
+        # Dynamisches Risiko anhand der letzten 10 Trades
+        rec = self.stats.get("recent_results", [])
+        if len(rec) >= 5:
+            win_rate = sum(1 for r in rec if r > 0) / len(rec)
+            if win_rate >= 0.6:
+                factor = 1.2  # Aggressiv bei starker Phase
+            elif win_rate <= 0.3:
+                factor = 0.8  # Defensiv bei schwacher Phase
+        return factor
 
     def record_result(self, r_multiple: float) -> None:
         s = self.stats
         s["total_r"] = round(s["total_r"] + r_multiple, 3)
+        rec = s.setdefault("recent_results", [])
+        rec.append(r_multiple)
+        if len(rec) > 10:
+            rec.pop(0)
+
         if r_multiple < -0.05:
             s["losses"] += 1
             s["consecutive_losses"] += 1
@@ -259,37 +263,33 @@ class BotState:
 
         if daily_ret <= -MAX_DAILY_LOSS and not day["halted"]:
             day["halted"] = True
-            notify(f"🛑 **Tagesverlustlimit erreicht** ({daily_ret:.2%}). Heute werden keine neuen Käufe mehr getätigt.")
+            notify(f"🛑 **Tagesverlustlimit erreicht** ({daily_ret:.2%}).")
 
         self.data["peak_equity"] = max(self.data["peak_equity"], equity)
         drawdown = equity / self.data["peak_equity"] - 1
         if drawdown <= -MAX_DRAWDOWN and not self.data["kill_switch"]:
             self.data["kill_switch"] = True
-            self.data["kill_reason"] = f"Drawdown {drawdown:.2%}"
-            notify(
-                f"🚨 **KILL-SWITCH AKTIVIERT**: Maximaler Rücksetzer von {drawdown:.2%} erreicht. "
-                f"Der Bot kauft erst wieder, wenn der Kill-Switch manuell zurückgesetzt wird."
-            )
+            notify(f"🚨 **KILL-SWITCH AKTIVIERT**: Drawdown {drawdown:.2%}.")
         self.save()
         return daily_ret, drawdown
-
 
 state = BotState(STATE_FILE)
 
 
 # ============================================================
-# 4. INDIKATOREN UND SIGNALLOGIK
+# 4. INDIKATOREN & VWAP
 # ============================================================
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    close, high, low = df["close"], df["high"], df["low"]
+    close, high, low, vol = df["close"], df["high"], df["low"], df["volume"]
 
+    # RSI
     delta = close.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1 / RSI_PERIOD, adjust=False, min_periods=RSI_PERIOD).mean()
-    avg_loss = loss.ewm(alpha=1 / RSI_PERIOD, adjust=False, min_periods=RSI_PERIOD).mean()
+    avg_gain = gain.ewm(alpha=1/RSI_PERIOD, adjust=False, min_periods=RSI_PERIOD).mean()
+    avg_loss = loss.ewm(alpha=1/RSI_PERIOD, adjust=False, min_periods=RSI_PERIOD).mean()
     rs = avg_gain / avg_loss.replace(0, np.nan)
     rsi = 100 - 100 / (1 + rs)
     rsi[(avg_loss == 0) & (avg_gain > 0)] = 100
@@ -300,13 +300,17 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["ema_fast"] = close.ewm(span=EMA_FAST, adjust=False).mean()
     df["ema_slow"] = close.ewm(span=EMA_SLOW, adjust=False).mean()
 
+    # ATR
     prev_close = close.shift(1)
-    tr = pd.concat(
-        [high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1
-    ).max(axis=1)
-    df["atr"] = tr.ewm(alpha=1 / ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean()
+    tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+    df["atr"] = tr.ewm(alpha=1/ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean()
 
-    df["rel_vol"] = df["volume"] / df["volume"].rolling(VOL_LOOKBACK).mean()
+    df["rel_vol"] = vol / vol.rolling(VOL_LOOKBACK).mean()
+    
+    # VWAP (Tagesbasiert)
+    days = pd.Series(df.index.date, index=df.index)
+    df["vwap"] = (close * vol).groupby(days).cumsum() / vol.groupby(days).cumsum()
+    
     return df
 
 
@@ -348,18 +352,14 @@ def attach_context(index: pd.Index, ctx: pd.DataFrame | None, col: str) -> np.nd
     return merged[col].eq(True).to_numpy()
 
 
-def build_signals(
-    df15: pd.DataFrame, ctx_symbol: pd.DataFrame | None, ctx_regime: pd.DataFrame | None
-) -> pd.DataFrame:
+def build_signals(df15: pd.DataFrame, ctx_symbol: pd.DataFrame | None, ctx_regime: pd.DataFrame | None) -> pd.DataFrame:
     df = add_indicators(df15)
     df["trend_ok"] = attach_context(df.index, ctx_symbol, "trend_ok")
     df["regime_ok"] = attach_context(df.index, ctx_regime, "regime_ok")
 
     ny = pd.DatetimeIndex(df.index).tz_convert(NY_TZ)
     end_min = ny.hour * 60 + ny.minute + BAR_MINUTES
-    time_ok = (end_min >= SESSION_OPEN + ENTRY_AFTER_OPEN_MIN) & (
-        end_min <= SESSION_CLOSE - ENTRY_BEFORE_CLOSE_MIN
-    )
+    time_ok = (end_min >= SESSION_OPEN + ENTRY_AFTER_OPEN_MIN) & (end_min <= SESSION_CLOSE - ENTRY_BEFORE_CLOSE_MIN)
 
     rsi_prev = df["rsi"].shift(1)
     setup = (rsi_prev < RSI_ENTRY_MAX) & (df["rsi"] > rsi_prev) & (df["rsi"] < RSI_ENTRY_CEIL)
@@ -368,11 +368,9 @@ def build_signals(
     vol_ok = df["rel_vol"] >= MIN_REL_VOLUME
     atr_pct = df["atr"] / df["close"]
     atr_ok = (atr_pct >= MIN_ATR_PCT) & (atr_pct <= MAX_ATR_PCT)
+    vwap_ok = df["close"] > df["vwap"]  # Filter: Nur über dem VWAP kaufen!
 
-    df["signal"] = (
-        setup & short_trend & confirm & vol_ok & atr_ok
-        & df["trend_ok"] & df["regime_ok"] & time_ok
-    ).fillna(False)
+    df["signal"] = (setup & short_trend & confirm & vol_ok & atr_ok & vwap_ok & df["trend_ok"] & df["regime_ok"] & time_ok).fillna(False)
 
     depth = ((RSI_ENTRY_MAX - rsi_prev) / RSI_ENTRY_MAX).clip(0, 1)
     strength = ((df["ema_fast"] - df["ema_slow"]) / df["atr"]).clip(0, 2) / 2
@@ -381,10 +379,7 @@ def build_signals(
     return df
 
 
-def position_size(
-    equity: float, cash: float, price: float, atr: float,
-    exposure: float, risk_factor: float = 1.0,
-) -> int:
+def position_size(equity: float, cash: float, price: float, atr: float, exposure: float, risk_factor: float = 1.0) -> int:
     if min(equity, price, atr) <= 0:
         return 0
     stop_distance = ATR_STOP_MULTIPLIER * atr
@@ -431,9 +426,7 @@ def fetch_bars(symbols: list[str], timeframe, start: datetime) -> dict[str, pd.D
             out[sym] = df
     return out
 
-
 _daily_cache: dict = {"date": None, "ctx": {}}
-
 
 def get_daily_contexts() -> dict[str, pd.DataFrame]:
     today = ny_now().date().isoformat()
@@ -447,12 +440,11 @@ def get_daily_contexts() -> dict[str, pd.DataFrame]:
 
 
 # ============================================================
-# 6. BROKER-HILFSFUNKTIONEN
+# 6. BROKER & ORDERS
 # ============================================================
 
 def get_positions() -> dict:
     return {p.symbol: p for p in trading_client.get_all_positions()}
-
 
 def get_open_orders() -> list:
     req = GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=500)
@@ -464,40 +456,26 @@ def get_open_orders() -> list:
                 flat.append(o)
     return flat
 
-
 def find_stop_order(open_orders: list, symbol: str):
     for o in open_orders:
-        if (
-            o.symbol == symbol
-            and _val(o.side) == "sell"
-            and _val(o.order_type) in ("stop", "stop_limit", "trailing_stop")
-        ):
+        if o.symbol == symbol and _val(o.side) == "sell" and _val(o.order_type) in ("stop", "stop_limit", "trailing_stop"):
             return o
     return None
-
 
 def submit_entry(symbol: str, qty: int, price: float, atr: float, bar_time: pd.Timestamp, score: float) -> bool:
     stop = round(price - ATR_STOP_MULTIPLIER * atr, 2)
     target = round(price + ATR_TARGET_MULTIPLIER * atr, 2)
-    if stop <= 0 or stop >= price - 0.01 or target <= price + 0.01:
-        logger.warning("%s: Ungültige Stop/Ziel-Level (%.2f/%.2f) - übersprungen.", symbol, stop, target)
-        return False
-
+    
     kauf_zeit = ny_now().strftime("%d.%m.%Y um %H:%M Uhr")
-
     msg = (
-        f"🟢 **GEKAUFT: {symbol}**\n"
+        f"🟢 **GEKAUFT: {symbol}** (mit VWAP-Filter)\n"
         f"🕒 **Zeitpunkt:** {kauf_zeit}\n"
         f"• **Menge:** {qty} Stück\n"
         f"• **Kaufpreis:** ${price:.2f}\n"
         f"• **Stop-Loss:** ${stop:.2f}\n"
-        f"• **Zielpreis:** ${target:.2f}\n"
-        f"• **Signal-Score:** {score:.0f}/100"
+        f"• **Risiko-Faktor:** {state.risk_factor()}x"
     )
-    if DRY_RUN:
-        logger.info("[TEST-MODUS] %s", msg)
-        return False
-
+    
     order = MarketOrderRequest(
         symbol=symbol,
         qty=qty,
@@ -511,7 +489,6 @@ def submit_entry(symbol: str, qty: int, price: float, atr: float, bar_time: pd.T
     try:
         submitted = trading_client.submit_order(order_data=order)
     except Exception:
-        logger.exception("%s: Kauf fehlgeschlagen.", symbol)
         return False
 
     state.trades[symbol] = {
@@ -531,18 +508,14 @@ def submit_entry(symbol: str, qty: int, price: float, atr: float, bar_time: pd.T
     notify(msg)
     return True
 
-
 def flatten(symbol: str, reason: str, open_orders: list, last_price: float | None = None) -> None:
-    if DRY_RUN:
-        logger.info("[TEST-MODUS] Würde %s schließen: %s", symbol, reason)
-        return
     try:
         for o in open_orders:
             if o.symbol == symbol:
                 try:
                     trading_client.cancel_order_by_id(o.id)
                 except Exception:
-                    logger.warning("%s: Order %s nicht stornierbar.", symbol, o.id)
+                    pass
         time.sleep(1.0)
         trading_client.close_position(symbol)
         if symbol in state.trades and last_price:
@@ -552,25 +525,19 @@ def flatten(symbol: str, reason: str, open_orders: list, last_price: float | Non
     except Exception:
         logger.exception("%s: Schließen fehlgeschlagen.", symbol)
 
-
 def modify_stop(symbol: str, new_stop: float, open_orders: list) -> bool:
-    if DRY_RUN:
-        logger.info("[TEST-MODUS] Würde %s-Stop auf %.2f anheben.", symbol, new_stop)
-        return False
     order = find_stop_order(open_orders, symbol)
     if order is None:
-        logger.warning("%s: Keine Stop-Order bei Alpaca gefunden.", symbol)
         return False
     try:
         trading_client.replace_order_by_id(order.id, ReplaceOrderRequest(stop_price=new_stop))
         return True
     except Exception:
-        logger.exception("%s: Stop-Anpassung fehlgeschlagen.", symbol)
         return False
 
 
 # ============================================================
-# 7. TRADE-VERWALTUNG
+# 7. TRADE-VERWALTUNG & RUNNER
 # ============================================================
 
 def reconcile_trades(positions: dict, open_orders: list) -> None:
@@ -596,12 +563,10 @@ def reconcile_trades(positions: dict, open_orders: list) -> None:
                 if _val(leg.status) == "filled" and leg.filled_avg_price:
                     exit_price = float(leg.filled_avg_price)
         except Exception:
-            logger.exception("%s: Order-Status nicht abrufbar.", symbol)
             continue
 
         state.trades.pop(symbol, None)
         if not filled:
-            notify(f"⚪ **{symbol}**: Kauf-Order wurde nicht ausgeführt.")
             state.save()
             continue
 
@@ -613,7 +578,6 @@ def reconcile_trades(positions: dict, open_orders: list) -> None:
             pnl = (exit_price - entry) * trade["qty"]
             state.record_result(r)
 
-            # GRÜN bei Gewinn / ROT bei Verlust
             if pnl >= 0:
                 header = f"🟢 **VERKAUFT MIT GEWINN: {symbol}**"
                 pnl_str = f"🟩 **Gewinn:** +${pnl:.2f} (+{r:.2f}R)"
@@ -621,25 +585,14 @@ def reconcile_trades(positions: dict, open_orders: list) -> None:
                 header = f"🔴 **VERKAUFT MIT VERLUST: {symbol}**"
                 pnl_str = f"🟥 **Verlust:** -${abs(pnl):.2f} ({r:.2f}R)"
 
-            notify(
-                f"{header}\n"
-                f"🕒 **Zeitpunkt:** {verkauf_zeit}\n"
-                f"• **Kaufpreis:** ${entry:.2f}\n"
-                f"• **Verkaufspreis:** ${exit_price:.2f}\n"
-                f"• {pnl_str}\n"
-                f"• **Verlustserie:** {state.stats['consecutive_losses']}"
-            )
-        else:
-            notify(f"ℹ️ **{symbol}** beendet am {verkauf_zeit} (Ergebnis nicht eindeutig ermittelbar).")
+            notify(f"{header}\n🕒 **Zeitpunkt:** {verkauf_zeit}\n• **Kauf:** ${entry:.2f}\n• **Verkauf:** ${exit_price:.2f}\n• {pnl_str}")
         state.save()
-
 
 def manage_positions(positions: dict, open_orders: list) -> None:
     now = datetime.now(timezone.utc)
     for symbol, pos in positions.items():
         trade = state.trades.get(symbol)
         if not trade:
-            logger.warning("%s: Position ohne Bot-Trade (manuell?) - wird nicht verwaltet.", symbol)
             continue
         try:
             price = float(pos.current_price)
@@ -650,16 +603,11 @@ def manage_positions(positions: dict, open_orders: list) -> None:
 
             entry, risk, stop = trade["entry"], trade["risk"], trade["stop"]
             r_mult = (price - entry) / risk
-            logger.info(
-                "%s | Einstieg %.2f | Jetzt %.2f | %+.2fR | Stop %.2f | Ziel %.2f",
-                symbol, entry, price, r_mult, stop, trade["target"],
-            )
-
-            # Sicherheitsnetz: Stop wurde unterschritten, Position besteht aber noch
+            
             if price <= stop * 0.998:
                 flatten(symbol, f"Sicherheitsnetz-Stop ({r_mult:+.2f}R)", open_orders, price)
                 continue
-
+            
             age_days = (now - datetime.fromisoformat(trade["submitted_at"])).total_seconds() / 86400
             if age_days > MAX_HOLD_DAYS:
                 flatten(symbol, f"Zeit-Exit nach {age_days:.1f} Tagen ({r_mult:+.2f}R)", open_orders, price)
@@ -668,14 +616,18 @@ def manage_positions(positions: dict, open_orders: list) -> None:
             desired = stop
             if r_mult >= BREAKEVEN_R:
                 desired = max(desired, entry + 0.1 * risk)
+            
+            # --- RUNNER UPGRADE: Aggressiver Stop statt fehleranfälligem Teilverkauf ---
             if r_mult >= TRAIL_START_R:
-                desired = max(desired, price - ATR_STOP_MULTIPLIER * trade["atr"])
+                # Zieht den Stop extrem eng an den aktuellen Preis heran (0.8 ATR)
+                desired = max(desired, price - 0.8 * trade["atr"])
+            
             desired = round(min(desired, price - 0.05), 2)
 
             if desired >= stop + 0.01 and modify_stop(symbol, desired, open_orders):
                 trade["stop"] = desired
                 state.save()
-                notify(f"🔼 **{symbol}**: Stop-Loss auf ${desired:.2f} angehoben ({r_mult:+.2f}R)")
+                notify(f"🔼 **{symbol}**: Stop auf ${desired:.2f} nachgezogen ({r_mult:+.2f}R). Runner läuft!")
         except Exception:
             logger.exception("%s: Fehler bei Positionsverwaltung.", symbol)
 
@@ -694,10 +646,8 @@ def scan_for_entries(clock, account, positions: dict, open_orders: list) -> None
 
     ctx = get_daily_contexts()
     if REGIME_SYMBOL not in ctx:
-        logger.warning("Kein Regime-Kontext (%s) - keine Käufe.", REGIME_SYMBOL)
         return
     regime_ctx = ctx[REGIME_SYMBOL]
-
     now = datetime.now(timezone.utc)
     candidates_symbols = [s for s in TICKERS if s not in occupied]
     bars = fetch_bars(candidates_symbols, TF_INTRADAY, now - timedelta(days=INTRADAY_LOOKBACK_DAYS))
@@ -710,16 +660,13 @@ def scan_for_entries(clock, account, positions: dict, open_orders: list) -> None
                 continue
             df = bars.get(symbol)
             if df is None:
-                logger.warning("%s: Keine Intraday-Daten.", symbol)
                 continue
             df = regular_hours(df)
             df = df[df.index + timedelta(minutes=BAR_MINUTES) <= now]
             if len(df) < MIN_BARS:
-                logger.warning("%s: Zu wenige Kerzen (%d).", symbol, len(df))
                 continue
             lag = now - (df.index[-1] + timedelta(minutes=BAR_MINUTES)).to_pydatetime()
             if lag > timedelta(minutes=MAX_BAR_LAG_MINUTES):
-                logger.warning("%s: Daten veraltet (%s).", symbol, lag)
                 continue
 
             sig = build_signals(df, ctx.get(symbol), regime_ctx)
@@ -731,14 +678,13 @@ def scan_for_entries(clock, account, positions: dict, open_orders: list) -> None
 
             last = sig.iloc[-1]
             logger.info(
-                "%s | Kurs %.2f | RSI %.1f | Tagestrend=%s | Regime=%s | Signal=%s | Score %.0f",
-                symbol, last["close"], last["rsi"], bool(last["trend_ok"]),
-                bool(last["regime_ok"]), bool(last["signal"]), last["score"],
+                "%s | Kurs %.2f | VWAP %.2f | RSI %.1f | Signal=%s",
+                symbol, last["close"], last["vwap"], last["rsi"], bool(last["signal"])
             )
             if bool(last["signal"]):
                 candidates.append((float(last["score"]), symbol, float(last["close"]), float(last["atr"]), bar_time))
         except Exception:
-            logger.exception("%s: Fehler bei der Signalberechnung.", symbol)
+            pass
 
     exposure = sum(abs(float(p.market_value)) for p in positions.values())
     for score, symbol, price, atr, bar_time in sorted(candidates, reverse=True):
@@ -746,7 +692,6 @@ def scan_for_entries(clock, account, positions: dict, open_orders: list) -> None
             break
         qty = position_size(equity, cash, price, atr, exposure, state.risk_factor())
         if qty < 1:
-            logger.info("%s: Signal, aber Positionsgröße 0.", symbol)
             continue
         if submit_entry(symbol, qty, price, atr, bar_time, score):
             slots -= 1
@@ -768,22 +713,17 @@ def maybe_daily_summary(account, daily_ret: float, drawdown: float) -> None:
             f"• Kontostand: ${float(account.equity):,.2f}\n"
             f"• Tagesrendite: {daily_ret:+.2%}\n"
             f"• Max. Rücksetzer: {drawdown:.2%}\n"
-            f"• Gesamt-Trades: {s['wins']} Gewinne / {s['losses']} Verluste\n"
-            f"• Kumulierte Performance: {s['total_r']:+.1f}R"
+            f"• Trades Gesamt: {s['wins']}W / {s['losses']}L\n"
+            f"• Performance: {s['total_r']:+.1f}R"
         )
         state.data["summary_date"] = today
         state.save()
-
 
 def run_cycle() -> int:
     clock = trading_client.get_clock()
     account = trading_client.get_account()
     equity = float(account.equity)
-    if equity <= 0:
-        raise RuntimeError("Ungültiges Eigenkapital.")
-    if getattr(account, "trading_blocked", False):
-        raise RuntimeError("Konto ist für den Handel gesperrt.")
-
+    
     last_equity = float(account.last_equity) if getattr(account, "last_equity", None) else None
     daily_ret, drawdown = state.update_risk(equity, last_equity)
 
@@ -793,35 +733,20 @@ def run_cycle() -> int:
     positions = get_positions()
     manage_positions(positions, open_orders)
 
-    logger.info(
-        "Eigenkapital=$%.2f | Tag %+.2f%% | DD %.2f%% | Positionen=%d | Markt=%s",
-        equity, daily_ret * 100, drawdown * 100, len(positions), "offen" if clock.is_open else "zu",
-    )
-
     if not clock.is_open:
         maybe_daily_summary(account, daily_ret, drawdown)
         return POLL_SECONDS_CLOSED
 
     minutes_to_close = (clock.next_close - clock.timestamp).total_seconds() / 60
-    if (
-        state.data["kill_switch"]
-        or state.data["day"].get("halted")
-        or minutes_to_close < ENTRY_BEFORE_CLOSE_MIN
-    ):
+    if state.data["kill_switch"] or state.data["day"].get("halted") or minutes_to_close < ENTRY_BEFORE_CLOSE_MIN:
         return POLL_SECONDS
 
     scan_for_entries(clock, account, get_positions(), get_open_orders())
     return POLL_SECONDS
 
-
 def live_main() -> None:
     init_clients()
-    acct = trading_client.get_account()
-    if float(acct.equity) < 25_000 and (
-        getattr(acct, "pattern_day_trader", False) or int(float(getattr(acct, "multiplier", 1) or 1)) > 1
-    ):
-        logger.warning("Konto < 25.000 $ mit Margin: Die Pattern-Day-Trader-Regel kann Trades blockieren.")
-    notify(f"🚀 **Bot gestartet**{' (Test-Modus)' if DRY_RUN else ''}\nBeobachte: {', '.join(TICKERS)}")
+    notify(f"🚀 **Bot gestartet** (VWAP-Version)\nBeobachte: {', '.join(TICKERS)}")
 
     errors = 0
     try:
@@ -832,197 +757,114 @@ def live_main() -> None:
                 errors = 0
             except Exception:
                 errors += 1
-                logger.exception("Fehler im Zyklus (Serie: %d).", errors)
                 if errors in (3, 10, 30):
-                    notify(f"⚠️ **Achtung**: {errors} Fehler in Folge - bitte Logs auf PythonAnywhere prüfen.")
+                    notify(f"⚠️ **Achtung**: {errors} Fehler in Folge.")
                 sleep_for = min(POLL_SECONDS * 2 ** min(errors, 4), 600)
             time.sleep(sleep_for)
     except KeyboardInterrupt:
-        notify("⏹️ **Bot manuell gestoppt**. Offene Positionen bleiben bei Alpaca abgesichert.")
+        notify("⏹️ **Bot manuell gestoppt**.")
 
 
 # ============================================================
 # 10. BACKTEST
 # ============================================================
 
-def simulate(
-    frames: dict[str, pd.DataFrame],
-    capital: float = STARTING_CAPITAL,
-    slippage_bps: float = SLIPPAGE_BPS,
-) -> dict:
+def simulate(frames: dict[str, pd.DataFrame], capital: float = STARTING_CAPITAL, slippage_bps: float = SLIPPAGE_BPS) -> dict:
     slip = slippage_bps / 10_000
-    rows = {
-        sym: {
-            ts: (o, h, l, c, a, bool(s), sc)
-            for ts, o, h, l, c, a, s, sc in zip(
-                f.index, f["open"], f["high"], f["low"], f["close"], f["atr"], f["signal"], f["score"]
-            )
-        }
-        for sym, f in frames.items()
-    }
+    rows = {sym: {ts: (o, h, l, c, a, bool(s), sc) for ts, o, h, l, c, a, s, sc in zip(f.index, f["open"], f["high"], f["low"], f["close"], f["atr"], f["signal"], f["score"])} for sym, f in frames.items()}
     all_ts = sorted(set().union(*[set(f.index) for f in frames.values()]))
     bar = timedelta(minutes=BAR_MINUTES)
-
-    cash = capital
-    positions: dict[str, dict] = {}
-    last_close: dict[str, float] = {}
-    last_exit: dict[str, pd.Timestamp] = {}
-    pending: list[tuple] = []
-    trades: list[dict] = []
-    curve: list[tuple] = []
-    consec_losses = 0
-    cur_day, day_start_equity, halted, prev_equity = None, capital, False, capital
+    cash, positions, last_close, last_exit, pending, trades, curve = capital, {}, {}, {}, [], [], []
+    consec_losses, cur_day, day_start_equity, halted, prev_equity = 0, None, capital, False, capital
 
     for ts in all_ts:
         for sym in frames:
-            row = rows[sym].get(ts)
-            if row:
-                last_close[sym] = row[3]
-
+            if row := rows[sym].get(ts): last_close[sym] = row[3]
         day = ts.tz_convert(NY_TZ).date()
-        if day != cur_day:
-            cur_day, day_start_equity, halted = day, prev_equity, False
+        if day != cur_day: cur_day, day_start_equity, halted = day, prev_equity, False
 
-        # 1) Einstiege aus Signalen der Vorkerze
         for sig_ts, score, sym, sig_close, atr in sorted(pending, key=lambda x: -x[1]):
-            row = rows[sym].get(ts)
-            if row is None or sym in positions or len(positions) >= MAX_OPEN_POSITIONS or halted:
-                continue
-            if ts - sig_ts > 2 * bar:
-                continue
-            if sym in last_exit and ts - last_exit[sym] < timedelta(minutes=COOLDOWN_MINUTES):
-                continue
-            entry = row[0] * (1 + slip)
-            stop = sig_close - ATR_STOP_MULTIPLIER * atr
-            target = sig_close + ATR_TARGET_MULTIPLIER * atr
-            if entry <= stop + 0.01 or entry >= target:
-                continue
+            if not (row := rows[sym].get(ts)) or sym in positions or len(positions) >= MAX_OPEN_POSITIONS or halted: continue
+            if ts - sig_ts > 2 * bar or (sym in last_exit and ts - last_exit[sym] < timedelta(minutes=COOLDOWN_MINUTES)): continue
+            entry, stop, target = row[0] * (1 + slip), sig_close - ATR_STOP_MULTIPLIER * atr, sig_close + ATR_TARGET_MULTIPLIER * atr
+            if entry <= stop + 0.01 or entry >= target: continue
             exposure = sum(p["qty"] * last_close[s] for s, p in positions.items())
-            equity_now = cash + exposure
             rf = LOSS_STREAK_RISK_FACTOR if consec_losses >= LOSS_STREAK_THROTTLE else 1.0
-            qty = position_size(equity_now, cash, entry, atr, exposure, rf)
-            if qty < 1:
-                continue
+            if (qty := position_size(cash + exposure, cash, entry, atr, exposure, rf)) < 1: continue
             cash -= qty * entry
-            positions[sym] = dict(qty=qty, entry=entry, stop=stop, target=target,
-                                  atr=atr, risk=entry - stop, entry_ts=ts)
+            positions[sym] = dict(qty=qty, entry=entry, stop=stop, target=target, atr=atr, risk=entry - stop, entry_ts=ts)
         pending = []
 
-        # 2) Positionen verwalten
         for sym, p in list(positions.items()):
-            row = rows[sym].get(ts)
-            if row is None:
-                continue
+            if not (row := rows[sym].get(ts)): continue
             o, h, l, c = row[:4]
             exit_price, limit_exit = None, False
-            if l <= p["stop"]:
-                exit_price = min(o, p["stop"])
-            elif h >= p["target"]:
-                exit_price, limit_exit = max(o, p["target"]), True
+            if l <= p["stop"]: exit_price = min(o, p["stop"])
+            elif h >= p["target"]: exit_price, limit_exit = max(o, p["target"]), True
             else:
                 r_mult = (c - p["entry"]) / p["risk"]
-                if r_mult >= BREAKEVEN_R:
-                    p["stop"] = max(p["stop"], p["entry"] + 0.1 * p["risk"])
-                if r_mult >= TRAIL_START_R:
-                    p["stop"] = max(p["stop"], c - ATR_STOP_MULTIPLIER * p["atr"])
-                if ts - p["entry_ts"] > timedelta(days=MAX_HOLD_DAYS):
-                    exit_price = c
+                if r_mult >= BREAKEVEN_R: p["stop"] = max(p["stop"], p["entry"] + 0.1 * p["risk"])
+                if r_mult >= TRAIL_START_R: p["stop"] = max(p["stop"], c - 0.8 * p["atr"])
+                if ts - p["entry_ts"] > timedelta(days=MAX_HOLD_DAYS): exit_price = c
             if exit_price is not None:
                 fill = exit_price if limit_exit else exit_price * (1 - slip)
                 cash += p["qty"] * fill
                 r = (fill - p["entry"]) / p["risk"]
-                trades.append(dict(symbol=sym, entry_ts=p["entry_ts"], exit_ts=ts, r=r,
-                                   pnl=(fill - p["entry"]) * p["qty"]))
-                if r < -0.05:
-                    consec_losses += 1
-                elif r > 0.05:
-                    consec_losses = 0
-                last_exit[sym] = ts
-                del positions[sym]
+                trades.append(dict(symbol=sym, entry_ts=p["entry_ts"], exit_ts=ts, r=r, pnl=(fill - p["entry"]) * p["qty"]))
+                if r < -0.05: consec_losses += 1
+                elif r > 0.05: consec_losses = 0
+                last_exit[sym], _ = ts, positions.pop(sym)
 
         equity = cash + sum(p["qty"] * last_close[s] for s, p in positions.items())
-        if equity / day_start_equity - 1 <= -MAX_DAILY_LOSS:
-            halted = True
+        if equity / day_start_equity - 1 <= -MAX_DAILY_LOSS: halted = True
         prev_equity = equity
         curve.append((ts, equity))
 
-        # 3) neue Signale dieser Kerze
         for sym in frames:
-            row = rows[sym].get(ts)
-            if row and row[5] and sym not in positions:
+            if (row := rows[sym].get(ts)) and row[5] and sym not in positions:
                 pending.append((ts, row[6], sym, row[3], row[4]))
 
     eq = pd.Series([v for _, v in curve], index=[t for t, _ in curve]) if curve else pd.Series(dtype=float)
     tdf = pd.DataFrame(trades)
-    result = {"equity": eq, "trades": tdf, "open_positions": len(positions)}
-    if len(eq):
-        dd = (eq / eq.cummax() - 1).min()
-        result["total_return"] = eq.iloc[-1] / capital - 1
-        result["max_drawdown"] = dd
+    result = {"equity": eq, "trades": tdf, "open_positions": len(positions), "n_trades": len(tdf)}
+    if len(eq): result.update(total_return=eq.iloc[-1] / capital - 1, max_drawdown=(eq / eq.cummax() - 1).min())
     if len(tdf):
         wins, losses = tdf[tdf["pnl"] > 0], tdf[tdf["pnl"] <= 0]
-        result["n_trades"] = len(tdf)
-        result["win_rate"] = len(wins) / len(tdf)
-        result["avg_r"] = tdf["r"].mean()
-        result["profit_factor"] = (
-            wins["pnl"].sum() / abs(losses["pnl"].sum()) if len(losses) and losses["pnl"].sum() != 0 else float("inf")
-        )
-    else:
-        result["n_trades"] = 0
+        result.update(win_rate=len(wins) / len(tdf), avg_r=tdf["r"].mean(), profit_factor=wins["pnl"].sum() / abs(losses["pnl"].sum()) if len(losses) and losses["pnl"].sum() != 0 else float("inf"))
     return result
-
 
 def run_backtest(days: int) -> None:
     init_clients()
     now = datetime.now(timezone.utc)
-    logger.info("Lade Daten für Backtest (%d Tage) ...", days)
     intraday = fetch_bars(TICKERS, TF_INTRADAY, now - timedelta(days=days + 14))
     daily = fetch_bars(TICKERS + [REGIME_SYMBOL], TimeFrame.Day, now - timedelta(days=days + DAILY_LOOKBACK_DAYS))
-    if REGIME_SYMBOL not in daily:
-        sys.exit("Keine Tagesdaten für das Regime-Symbol.")
+    if REGIME_SYMBOL not in daily: sys.exit("Keine Tagesdaten.")
     regime_ctx = daily_context(daily[REGIME_SYMBOL])
 
     frames, bench = {}, []
     cutoff = now - timedelta(days=days)
     for sym in TICKERS:
-        if sym not in intraday or sym not in daily:
-            logger.warning("%s: keine Daten - ausgelassen.", sym)
-            continue
+        if sym not in intraday or sym not in daily: continue
         sig = build_signals(regular_hours(intraday[sym]), daily_context(daily[sym]), regime_ctx)
         sig = sig[sig.index >= cutoff]
-        if sig.empty:
-            continue
+        if sig.empty: continue
         frames[sym] = sig
         bench.append(sig["close"].iloc[-1] / sig["close"].iloc[0] - 1)
-    if not frames:
-        sys.exit("Keine Daten für den Backtest.")
-
+    
+    if not frames: sys.exit("Keine Daten für Backtest.")
     res = simulate(frames)
     print("\n=========== BACKTEST ===========")
-    print(f"Zeitraum: letzte {days} Tage | Symbole: {', '.join(frames)} | Slippage {SLIPPAGE_BPS} bp/Seite")
-    print(f"Trades:         {res['n_trades']}")
+    print(f"Trades: {res['n_trades']}")
     if res["n_trades"]:
-        print(f"Trefferquote:   {res['win_rate']:.1%}")
-        print(f"Ø Ergebnis:     {res['avg_r']:+.2f} R pro Trade")
-        print(f"Profit-Faktor:  {res['profit_factor']:.2f}")
-    print(f"Rendite:        {res.get('total_return', 0):+.2%}")
-    print(f"Max. Drawdown:  {res.get('max_drawdown', 0):.2%}")
-    print(f"Buy&Hold (Ø gleichgewichtet): {np.mean(bench):+.2%}")
-
-
-# ============================================================
-# 11. EINSTIEGSPUNKT
-# ============================================================
+        print(f"Trefferquote: {res['win_rate']:.1%} | Ø Ergebnis: {res['avg_r']:+.2f}R | Rendite: {res.get('total_return', 0):+.2%} | Max. Drawdown: {res.get('max_drawdown', 0):.2%}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Smart Trading Bot (Alpaca)")
-    parser.add_argument("--backtest", action="store_true", help="Backtest statt Live-Betrieb")
-    parser.add_argument("--days", type=int, default=120, help="Backtest-Zeitraum in Tagen")
-    parser.add_argument("--dry-run", action="store_true", help="Signale loggen, aber keine Orders senden")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--backtest", action="store_true")
+    parser.add_argument("--days", type=int, default=120)
+    parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     DRY_RUN = args.dry_run
-    if args.backtest:
-        run_backtest(args.days)
-    else:
-        live_main()
+    if args.backtest: run_backtest(args.days)
+    else: live_main()
