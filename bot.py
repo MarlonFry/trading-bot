@@ -100,8 +100,27 @@ LOSS_STREAK_RISK_FACTOR = 0.5
 MIN_ORDER_VALUE = 50.0
 
 # --- Telegram ---
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or "8661524937:AAF8MQkKVggFYDiFQrYTyjxQLG4zLBVam2Q"
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or "8859741833"
+def notify(message: str) -> None:
+    logger.info(message)
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": f"🤖 **Smart Trading Bot**\n{message}",
+        "parse_mode": "Markdown",
+    }
+    # Automatisch bis zu 3 Versuche bei Proxy-Higgupern
+    for attempt in range(3):
+        try:
+            r = http.post(url, json=payload, timeout=10)
+            r.raise_for_status()
+            return  # Erfolgreich gesendet
+        except requests.RequestException as exc:
+            if attempt < 2:
+                time.sleep(2)  # 2 Sekunden warten vor neuem Versuch
+            else:
+                logger.error("Telegram-Fehler nach 3 Versuchen: %s", exc)
 
 POLL_SECONDS = 60
 POLL_SECONDS_CLOSED = 300
