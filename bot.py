@@ -1,5 +1,5 @@
 """
-Smart Trading Bot v3.3 (Alpaca, 8 Ticker, VWAP, Score-Sizing "Fetter Fisch" & Telegram-Retry)
+Smart Trading Bot v3.4 (Alpaca, 8 Ticker, VWAP, High-Risk Sizing)
 """
 from __future__ import annotations
 
@@ -52,7 +52,6 @@ except ImportError as _exc:
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or "8661524937:AAF8MQkKVggFYDiFQrYTyjxQLG4zLBVam2Q"
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or "8859741833"
 
-# --- Watchlist: 8 liquide Top-Aktien ---
 TICKERS = ["AAPL", "NVDA", "TSLA", "MSFT", "AMD", "AMZN", "META", "GOOGL"]
 REGIME_SYMBOL = "SPY"
 
@@ -92,15 +91,15 @@ TRAIL_START_R = 1.8
 MAX_HOLD_DAYS = 5
 COOLDOWN_MINUTES = 30
 
-# --- Risikomanagement & "Fetter Fisch" Grenzen ---
-MAX_POSITION_FRACTION = 0.25
-MAX_TOTAL_EXPOSURE = 0.85
+# --- Risikomanagement (High-Risk Anpassung) ---
+MAX_POSITION_FRACTION = 0.95   # Fast 100% des Kontos für einen Trade erlaubt
+MAX_TOTAL_EXPOSURE = 0.95      # Gesamtes Geld darf im Markt sein
 MAX_OPEN_POSITIONS = 4
-MAX_DAILY_LOSS = 0.03
-MAX_DRAWDOWN = 0.10
+MAX_DAILY_LOSS = 0.15          # Tagesverlust-Grenze auf 15% gelockert
+MAX_DRAWDOWN = 0.30            # Drawdown-Limit auf 30% gelockert
 LOSS_STREAK_THROTTLE = 3
 LOSS_STREAK_RISK_FACTOR = 0.5
-MIN_ORDER_VALUE = 50.0
+MIN_ORDER_VALUE = 10.0         # Blockade für kleine Orders entfernt
 
 POLL_SECONDS = 60
 POLL_SECONDS_CLOSED = 300
@@ -279,7 +278,7 @@ state = BotState(STATE_FILE)
 
 
 # ============================================================
-# 4. INDIKATOREN, VWAP & "FETTER FISCH" POSITION SIZING
+# 4. INDIKATOREN & VWAP
 # ============================================================
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -388,10 +387,7 @@ def position_size(
     score: float = 50.0,
 ) -> int:
     """
-    Score-basierte Positionsgrößenberechnung ("Fetter Fisch" Logik)
-    - Max $10.00 Risiko bei Score >= 70
-    - $7.50 Risiko bei Score >= 55
-    - $5.00 Risiko bei Standard-Signalen
+    Score-basierte Positionsgrößenberechnung ("High-Risk" Logik)
     """
     if min(equity, price, atr) <= 0:
         return 0
@@ -399,18 +395,15 @@ def position_size(
     if stop_distance <= 0:
         return 0
 
-    # Risikostufe anhand des Signal-Scores festlegen
     if score >= 70:
-        target_risk = 10.0  # Fetter Fisch: $10.00 Max-Risiko
+        target_risk = 50.0  # Fetter Fisch: 50$ max Risiko
     elif score >= 55:
-        target_risk = 7.5   # Solides Signal: $7.50 Risiko
+        target_risk = 35.0  # Solides Signal: 35$ max Risiko
     else:
-        target_risk = 5.0   # Standard-Signal: $5.00 Risiko
+        target_risk = 20.0  # Standard-Signal: 20$ max Risiko
 
-    # Risiko anpassen (z.B. bei Verlustserie)
     effective_risk = target_risk * risk_factor
 
-    # Stückzahl exakt so berechnen, dass der Verlust bei Stop-Loss maximal effective_risk beträgt
     qty_by_risk = int(effective_risk / stop_distance)
     
     available = max(0.0, equity * MAX_TOTAL_EXPOSURE - exposure)
@@ -497,7 +490,7 @@ def submit_entry(symbol: str, qty: int, price: float, atr: float, bar_time: pd.T
     target = round(price + ATR_TARGET_MULTIPLIER * atr, 2)
     
     kauf_zeit = ny_now().strftime("%d.%m.%Y um %H:%M Uhr")
-    fisch_label = "🐋 **FETTER FISCH!**" if score >= 70 else ("🎯 Solides Signal" if score >= 55 else "⚡ Standard-Signal")
+    fisch_label = "🔥 **HIGH-RISK FETTER FISCH!**" if score >= 70 else ("🎯 Solides Signal" if score >= 55 else "⚡ Standard-Signal")
     
     msg = (
         f"🟢 **GEKAUFT: {symbol}** ({fisch_label})\n"
@@ -777,7 +770,7 @@ def run_cycle() -> int:
 
 def live_main() -> None:
     init_clients()
-    notify(f"🚀 **Bot gestartet** (v3.3 Fetter-Fisch Sizing)\nBeobachte: {', '.join(TICKERS)}")
+    notify(f"🚀 **Bot gestartet** (v3.4 High-Risk Sizing)\nBeobachte: {', '.join(TICKERS)}")
 
     errors = 0
     try:
