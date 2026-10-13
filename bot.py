@@ -1,5 +1,5 @@
 """
-Smart Trading Bot v3.1 (Alpaca, VWAP, Dynamisches Risiko, Runner-Stop, Optimierte Parameter)
+Smart Trading Bot v3.2 (Alpaca, Erweiterte Watchlist, VWAP, Multi-Position & High-Frequency)
 """
 from __future__ import annotations
 
@@ -52,7 +52,8 @@ except ImportError as _exc:
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or "8661524937:AAF8MQkKVggFYDiFQrYTyjxQLG4zLBVam2Q"
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or "8859741833"
 
-TICKERS = ["AAPL", "NVDA", "TSLA", "MSFT"]
+# --- Watchlist erweitert auf 8 liquide Tech-Garanten ---
+TICKERS = ["AAPL", "NVDA", "TSLA", "MSFT", "AMD", "AMZN", "META", "GOOGL"]
 REGIME_SYMBOL = "SPY"
 
 BAR_MINUTES = 15
@@ -61,15 +62,15 @@ DATA_FEED_NAME = os.getenv("BOT_DATA_FEED", "iex").lower()
 
 # --- Optimierte Einstiegsstrategie ---
 RSI_PERIOD = 14
-RSI_ENTRY_MAX = 48             # Auf 48 erhöht für frühere & mehr Einstiege
-RSI_ENTRY_CEIL = 55
+RSI_ENTRY_MAX = 50             # Flexiblerer Einstiegsbereich
+RSI_ENTRY_CEIL = 58
 EMA_FAST = 20
 EMA_SLOW = 50
 ATR_PERIOD = 14
 VOL_LOOKBACK = 20
-MIN_REL_VOLUME = 0.7
-MIN_ATR_PCT = 0.0015
-MAX_ATR_PCT = 0.03
+MIN_REL_VOLUME = 0.5           # Lockeres Limit für mehr Signale
+MIN_ATR_PCT = 0.0010
+MAX_ATR_PCT = 0.04
 
 # --- Tageskontext ---
 D_EMA_FAST = 20
@@ -84,18 +85,18 @@ ENTRY_AFTER_OPEN_MIN = 30
 ENTRY_BEFORE_CLOSE_MIN = 30
 
 # --- Ausstieg ---
-ATR_STOP_MULTIPLIER = 2.0      # Auf 2.0 erhöht für mehr Puffer bei Volatilität
+ATR_STOP_MULTIPLIER = 2.0
 ATR_TARGET_MULTIPLIER = 4.5
 BREAKEVEN_R = 1.0
-TRAIL_START_R = 2.0
+TRAIL_START_R = 1.8            # Zieht Gewinn-Stop früher nach
 MAX_HOLD_DAYS = 5
-COOLDOWN_MINUTES = 60
+COOLDOWN_MINUTES = 30          # Cooldown halbiert für schnellere Neu-Trades
 
 # --- Risikomanagement ---
 RISK_PER_TRADE = 0.01
 MAX_POSITION_FRACTION = 0.25
-MAX_TOTAL_EXPOSURE = 0.80
-MAX_OPEN_POSITIONS = 3
+MAX_TOTAL_EXPOSURE = 0.85
+MAX_OPEN_POSITIONS = 4         # Bis zu 4 Trades gleichzeitig
 MAX_DAILY_LOSS = 0.03
 MAX_DRAWDOWN = 0.10
 LOSS_STREAK_THROTTLE = 3
@@ -467,7 +468,7 @@ def submit_entry(symbol: str, qty: int, price: float, atr: float, bar_time: pd.T
     
     kauf_zeit = ny_now().strftime("%d.%m.%Y um %H:%M Uhr")
     msg = (
-        f"🟢 **GEKAUFT: {symbol}** (mit VWAP-Filter)\n"
+        f"🟢 **GEKAUFT: {symbol}** (VWAP-Match)\n"
         f"🕒 **Zeitpunkt:** {kauf_zeit}\n"
         f"• **Menge:** {qty} Stück\n"
         f"• **Kaufpreis:** ${price:.2f}\n"
@@ -743,7 +744,7 @@ def run_cycle() -> int:
 
 def live_main() -> None:
     init_clients()
-    notify(f"🚀 **Bot gestartet** (v3.1 Optimiert)\nBeobachte: {', '.join(TICKERS)}")
+    notify(f"🚀 **Bot gestartet** (v3.2 High-Frequency)\nBeobachte: {', '.join(TICKERS)}")
 
     errors = 0
     try:
