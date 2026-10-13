@@ -1,5 +1,5 @@
 """
-Smart Trading Bot v3 (Alpaca, VWAP, Dynamisches Risiko & Runner-Stop)
+Smart Trading Bot v3 (Alpaca, VWAP, Dynamisches Risiko, Runner-Stop & Telegram-Retry)
 """
 from __future__ import annotations
 
@@ -46,9 +46,14 @@ except ImportError as _exc:
 
 
 # ============================================================
-# 1. KONFIGURATION
+# 1. KONFIGURATION & TELEGRAM KEYS
 # ============================================================
 
+# --- Telegram Zugangsdaten (Zwingend ganz oben) ---
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or "8661524937:AAF8MQkKVggFYDiFQrYTyjxQLG4zLBVam2Q"
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or "8859741833"
+
+# --- Handelsparameter ---
 TICKERS = ["AAPL", "NVDA", "TSLA", "MSFT"]
 REGIME_SYMBOL = "SPY"
 
@@ -74,7 +79,7 @@ D_EMA_SLOW = 50
 D_SMA_TREND = 200
 REGIME_EMA = 50
 
-# --- Handelszeiten ---
+# --- Handelszeiten (US-Börsenzeit) ---
 SESSION_OPEN = 9 * 60 + 30
 SESSION_CLOSE = 16 * 60
 ENTRY_AFTER_OPEN_MIN = 30
@@ -84,7 +89,7 @@ ENTRY_BEFORE_CLOSE_MIN = 30
 ATR_STOP_MULTIPLIER = 1.5
 ATR_TARGET_MULTIPLIER = 4.5
 BREAKEVEN_R = 1.0
-TRAIL_START_R = 2.0            # Ab hier greift der "Runner"
+TRAIL_START_R = 2.0
 MAX_HOLD_DAYS = 5
 COOLDOWN_MINUTES = 60
 
@@ -98,29 +103,6 @@ MAX_DRAWDOWN = 0.10
 LOSS_STREAK_THROTTLE = 3
 LOSS_STREAK_RISK_FACTOR = 0.5
 MIN_ORDER_VALUE = 50.0
-
-# --- Telegram ---
-def notify(message: str) -> None:
-    logger.info(message)
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": f"🤖 **Smart Trading Bot**\n{message}",
-        "parse_mode": "Markdown",
-    }
-    # Automatisch bis zu 3 Versuche bei Proxy-Higgupern
-    for attempt in range(3):
-        try:
-            r = http.post(url, json=payload, timeout=10)
-            r.raise_for_status()
-            return  # Erfolgreich gesendet
-        except requests.RequestException as exc:
-            if attempt < 2:
-                time.sleep(2)  # 2 Sekunden warten vor neuem Versuch
-            else:
-                logger.error("Telegram-Fehler nach 3 Versuchen: %s", exc)
 
 POLL_SECONDS = 60
 POLL_SECONDS_CLOSED = 300
@@ -139,7 +121,7 @@ NY = ZoneInfo(NY_TZ)
 
 
 # ============================================================
-# 2. LOGGING, CLIENTS, BENACHRICHTIGUNG
+# 2. LOGGING, CLIENTS & BENACHRICHTIGUNG
 # ============================================================
 
 logger = logging.getLogger("smart_bot")
@@ -163,17 +145,23 @@ def notify(message: str) -> None:
     logger.info(message)
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": f"🤖 **Smart Trading Bot**\n{message}",
-            "parse_mode": "Markdown",
-        }
-        r = http.post(url, json=payload, timeout=10)
-        r.raise_for_status()
-    except requests.RequestException as exc:
-        logger.error("Telegram-Fehler: %s", exc)
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": f"🤖 **Smart Trading Bot**\n{message}",
+        "parse_mode": "Markdown",
+    }
+    # Automatisch bis zu 3 Versuche bei Proxy-Hickups auf PythonAnywhere
+    for attempt in range(3):
+        try:
+            r = http.post(url, json=payload, timeout=10)
+            r.raise_for_status()
+            return
+        except requests.RequestException as exc:
+            if attempt < 2:
+                time.sleep(2)
+            else:
+                logger.error("Telegram-Fehler nach 3 Versuchen: %s", exc)
 
 
 def init_clients() -> None:
@@ -243,18 +231,16 @@ class BotState:
 
     def risk_factor(self) -> float:
         factor = 1.0
-        # Hartes Herunterfahren bei Verlustserie
         if self.stats["consecutive_losses"] >= LOSS_STREAK_THROTTLE:
             return LOSS_STREAK_RISK_FACTOR
         
-        # Dynamisches Risiko anhand der letzten 10 Trades
         rec = self.stats.get("recent_results", [])
         if len(rec) >= 5:
             win_rate = sum(1 for r in rec if r > 0) / len(rec)
             if win_rate >= 0.6:
-                factor = 1.2  # Aggressiv bei starker Phase
+                factor = 1.2
             elif win_rate <= 0.3:
-                factor = 0.8  # Defensiv bei schwacher Phase
+                factor = 0.8
         return factor
 
     def record_result(self, r_multiple: float) -> None:
@@ -303,7 +289,6 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     close, high, low, vol = df["close"], df["high"], df["low"], df["volume"]
 
-    # RSI
     delta = close.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -319,14 +304,12 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["ema_fast"] = close.ewm(span=EMA_FAST, adjust=False).mean()
     df["ema_slow"] = close.ewm(span=EMA_SLOW, adjust=False).mean()
 
-    # ATR
     prev_close = close.shift(1)
     tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
     df["atr"] = tr.ewm(alpha=1/ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean()
 
     df["rel_vol"] = vol / vol.rolling(VOL_LOOKBACK).mean()
     
-    # VWAP (Tagesbasiert)
     days = pd.Series(df.index.date, index=df.index)
     df["vwap"] = (close * vol).groupby(days).cumsum() / vol.groupby(days).cumsum()
     
@@ -387,7 +370,7 @@ def build_signals(df15: pd.DataFrame, ctx_symbol: pd.DataFrame | None, ctx_regim
     vol_ok = df["rel_vol"] >= MIN_REL_VOLUME
     atr_pct = df["atr"] / df["close"]
     atr_ok = (atr_pct >= MIN_ATR_PCT) & (atr_pct <= MAX_ATR_PCT)
-    vwap_ok = df["close"] > df["vwap"]  # Filter: Nur über dem VWAP kaufen!
+    vwap_ok = df["close"] > df["vwap"]
 
     df["signal"] = (setup & short_trend & confirm & vol_ok & atr_ok & vwap_ok & df["trend_ok"] & df["regime_ok"] & time_ok).fillna(False)
 
@@ -636,9 +619,7 @@ def manage_positions(positions: dict, open_orders: list) -> None:
             if r_mult >= BREAKEVEN_R:
                 desired = max(desired, entry + 0.1 * risk)
             
-            # --- RUNNER UPGRADE: Aggressiver Stop statt fehleranfälligem Teilverkauf ---
             if r_mult >= TRAIL_START_R:
-                # Zieht den Stop extrem eng an den aktuellen Preis heran (0.8 ATR)
                 desired = max(desired, price - 0.8 * trade["atr"])
             
             desired = round(min(desired, price - 0.05), 2)
