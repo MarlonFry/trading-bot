@@ -1,5 +1,5 @@
 """
-Smart Trading Bot v3.2 (Alpaca, Erweiterte Watchlist, VWAP, Multi-Position & High-Frequency)
+Smart Trading Bot v3.3 (Alpaca, 8 Ticker, VWAP, Score-Sizing "Fetter Fisch" & Telegram-Retry)
 """
 from __future__ import annotations
 
@@ -52,7 +52,7 @@ except ImportError as _exc:
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or "8661524937:AAF8MQkKVggFYDiFQrYTyjxQLG4zLBVam2Q"
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or "8859741833"
 
-# --- Watchlist erweitert auf 8 liquide Tech-Garanten ---
+# --- Watchlist: 8 liquide Top-Aktien ---
 TICKERS = ["AAPL", "NVDA", "TSLA", "MSFT", "AMD", "AMZN", "META", "GOOGL"]
 REGIME_SYMBOL = "SPY"
 
@@ -60,15 +60,15 @@ BAR_MINUTES = 15
 TF_INTRADAY = TimeFrame(BAR_MINUTES, TimeFrameUnit.Minute) if ALPACA_OK else None
 DATA_FEED_NAME = os.getenv("BOT_DATA_FEED", "iex").lower()
 
-# --- Optimierte Einstiegsstrategie ---
+# --- Einstiegsstrategie ---
 RSI_PERIOD = 14
-RSI_ENTRY_MAX = 50             # Flexiblerer Einstiegsbereich
+RSI_ENTRY_MAX = 50
 RSI_ENTRY_CEIL = 58
 EMA_FAST = 20
 EMA_SLOW = 50
 ATR_PERIOD = 14
 VOL_LOOKBACK = 20
-MIN_REL_VOLUME = 0.5           # Lockeres Limit für mehr Signale
+MIN_REL_VOLUME = 0.5
 MIN_ATR_PCT = 0.0010
 MAX_ATR_PCT = 0.04
 
@@ -88,15 +88,14 @@ ENTRY_BEFORE_CLOSE_MIN = 30
 ATR_STOP_MULTIPLIER = 2.0
 ATR_TARGET_MULTIPLIER = 4.5
 BREAKEVEN_R = 1.0
-TRAIL_START_R = 1.8            # Zieht Gewinn-Stop früher nach
+TRAIL_START_R = 1.8
 MAX_HOLD_DAYS = 5
-COOLDOWN_MINUTES = 30          # Cooldown halbiert für schnellere Neu-Trades
+COOLDOWN_MINUTES = 30
 
-# --- Risikomanagement ---
-RISK_PER_TRADE = 0.01
+# --- Risikomanagement & "Fetter Fisch" Grenzen ---
 MAX_POSITION_FRACTION = 0.25
 MAX_TOTAL_EXPOSURE = 0.85
-MAX_OPEN_POSITIONS = 4         # Bis zu 4 Trades gleichzeitig
+MAX_OPEN_POSITIONS = 4
 MAX_DAILY_LOSS = 0.03
 MAX_DRAWDOWN = 0.10
 LOSS_STREAK_THROTTLE = 3
@@ -280,7 +279,7 @@ state = BotState(STATE_FILE)
 
 
 # ============================================================
-# 4. INDIKATOREN & VWAP
+# 4. INDIKATOREN, VWAP & "FETTER FISCH" POSITION SIZING
 # ============================================================
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -379,14 +378,45 @@ def build_signals(df15: pd.DataFrame, ctx_symbol: pd.DataFrame | None, ctx_regim
     return df
 
 
-def position_size(equity: float, cash: float, price: float, atr: float, exposure: float, risk_factor: float = 1.0) -> int:
+def position_size(
+    equity: float,
+    cash: float,
+    price: float,
+    atr: float,
+    exposure: float,
+    risk_factor: float = 1.0,
+    score: float = 50.0,
+) -> int:
+    """
+    Score-basierte Positionsgrößenberechnung ("Fetter Fisch" Logik)
+    - Max $10.00 Risiko bei Score >= 70
+    - $7.50 Risiko bei Score >= 55
+    - $5.00 Risiko bei Standard-Signalen
+    """
     if min(equity, price, atr) <= 0:
         return 0
     stop_distance = ATR_STOP_MULTIPLIER * atr
-    qty_by_risk = int(equity * RISK_PER_TRADE * risk_factor / stop_distance)
+    if stop_distance <= 0:
+        return 0
+
+    # Risikostufe anhand des Signal-Scores festlegen
+    if score >= 70:
+        target_risk = 10.0  # Fetter Fisch: $10.00 Max-Risiko
+    elif score >= 55:
+        target_risk = 7.5   # Solides Signal: $7.50 Risiko
+    else:
+        target_risk = 5.0   # Standard-Signal: $5.00 Risiko
+
+    # Risiko anpassen (z.B. bei Verlustserie)
+    effective_risk = target_risk * risk_factor
+
+    # Stückzahl exakt so berechnen, dass der Verlust bei Stop-Loss maximal effective_risk beträgt
+    qty_by_risk = int(effective_risk / stop_distance)
+    
     available = max(0.0, equity * MAX_TOTAL_EXPOSURE - exposure)
     allowed = min(available, equity * MAX_POSITION_FRACTION, cash)
     qty = min(qty_by_risk, int(allowed / price))
+    
     if qty < 1 or qty * price < MIN_ORDER_VALUE:
         return 0
     return qty
@@ -467,13 +497,16 @@ def submit_entry(symbol: str, qty: int, price: float, atr: float, bar_time: pd.T
     target = round(price + ATR_TARGET_MULTIPLIER * atr, 2)
     
     kauf_zeit = ny_now().strftime("%d.%m.%Y um %H:%M Uhr")
+    fisch_label = "🐋 **FETTER FISCH!**" if score >= 70 else ("🎯 Solides Signal" if score >= 55 else "⚡ Standard-Signal")
+    
     msg = (
-        f"🟢 **GEKAUFT: {symbol}** (VWAP-Match)\n"
+        f"🟢 **GEKAUFT: {symbol}** ({fisch_label})\n"
         f"🕒 **Zeitpunkt:** {kauf_zeit}\n"
+        f"• **Score:** {score:.0f}/100\n"
         f"• **Menge:** {qty} Stück\n"
         f"• **Kaufpreis:** ${price:.2f}\n"
         f"• **Stop-Loss:** ${stop:.2f}\n"
-        f"• **Risiko-Faktor:** {state.risk_factor()}x"
+        f"• **Max-Risiko:** ${abs(price - stop) * qty:.2f}"
     )
     
     order = MarketOrderRequest(
@@ -676,8 +709,8 @@ def scan_for_entries(clock, account, positions: dict, open_orders: list) -> None
 
             last = sig.iloc[-1]
             logger.info(
-                "%s | Kurs %.2f | VWAP %.2f | RSI %.1f | Signal=%s",
-                symbol, last["close"], last["vwap"], last["rsi"], bool(last["signal"])
+                "%s | Kurs %.2f | VWAP %.2f | RSI %.1f | Score %.0f | Signal=%s",
+                symbol, last["close"], last["vwap"], last["rsi"], last["score"], bool(last["signal"])
             )
             if bool(last["signal"]):
                 candidates.append((float(last["score"]), symbol, float(last["close"]), float(last["atr"]), bar_time))
@@ -688,7 +721,7 @@ def scan_for_entries(clock, account, positions: dict, open_orders: list) -> None
     for score, symbol, price, atr, bar_time in sorted(candidates, reverse=True):
         if slots <= 0:
             break
-        qty = position_size(equity, cash, price, atr, exposure, state.risk_factor())
+        qty = position_size(equity, cash, price, atr, exposure, state.risk_factor(), score)
         if qty < 1:
             continue
         if submit_entry(symbol, qty, price, atr, bar_time, score):
@@ -744,7 +777,7 @@ def run_cycle() -> int:
 
 def live_main() -> None:
     init_clients()
-    notify(f"🚀 **Bot gestartet** (v3.2 High-Frequency)\nBeobachte: {', '.join(TICKERS)}")
+    notify(f"🚀 **Bot gestartet** (v3.3 Fetter-Fisch Sizing)\nBeobachte: {', '.join(TICKERS)}")
 
     errors = 0
     try:
@@ -788,7 +821,7 @@ def simulate(frames: dict[str, pd.DataFrame], capital: float = STARTING_CAPITAL,
             if entry <= stop + 0.01 or entry >= target: continue
             exposure = sum(p["qty"] * last_close[s] for s, p in positions.items())
             rf = LOSS_STREAK_RISK_FACTOR if consec_losses >= LOSS_STREAK_THROTTLE else 1.0
-            if (qty := position_size(cash + exposure, cash, entry, atr, exposure, rf)) < 1: continue
+            if (qty := position_size(cash + exposure, cash, entry, atr, exposure, rf, score)) < 1: continue
             cash -= qty * entry
             positions[sym] = dict(qty=qty, entry=entry, stop=stop, target=target, atr=atr, risk=entry - stop, entry_ts=ts)
         pending = []
