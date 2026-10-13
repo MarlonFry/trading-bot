@@ -126,7 +126,8 @@ SLIPPAGE_BPS = 5.0             # je Seite, in Basispunkten
 
 NY_TZ = "America/New_York"
 NY = ZoneInfo(NY_TZ)
-
+TELEGRAM_BOT_TOKEN = "8661524937:AAF8MQkKVggFYDiFQrYTyjxQLG4zLBVam2Q"
+TELEGRAM_CHAT_ID = "8859741833"
 
 # ============================================================
 # 2. LOGGING, CLIENTS, BENACHRICHTIGUNG
