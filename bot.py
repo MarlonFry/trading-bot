@@ -132,12 +132,6 @@ if not logger.handlers:
     _file.setFormatter(_fmt)
     logger.addHandler(_file)
 
-trading_client = None
-data_client = None
-DRY_RUN = False
-http = requests.Session()
-
-
 def notify(message: str) -> None:
     logger.info(message)
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -148,16 +142,23 @@ def notify(message: str) -> None:
         "text": f"🤖 **Smart Trading Bot**\n{message}",
         "parse_mode": "Markdown",
     }
-    for attempt in range(3):
+    
+    # PythonAnywhere Proxy explizit vorgeben
+    proxies = {
+        "http": "http://proxy.server:3128",
+        "https": "http://proxy.server:3128",
+    }
+    
+    for attempt in range(5):
         try:
-            r = http.post(url, json=payload, timeout=10)
+            r = requests.post(url, json=payload, proxies=proxies, timeout=15)
             r.raise_for_status()
             return
         except requests.RequestException as exc:
-            if attempt < 2:
-                time.sleep(2)
+            if attempt < 4:
+                time.sleep(3 * (attempt + 1))
             else:
-                logger.error("Telegram-Fehler nach 3 Versuchen: %s", exc)
+                logger.error("Telegram-Fehler nach 5 Versuchen: %s", exc)
 
 
 def init_clients() -> None:
