@@ -1,5 +1,5 @@
 """
-Smart Trading Bot v3.4 (Alpaca, 8 Ticker, VWAP, High-Risk Sizing)
+Smart Trading Bot v3.4 (Alpaca, 8 Ticker, VWAP, High-Risk Sizing, Robust Telegram Proxy)
 """
 from __future__ import annotations
 
@@ -132,6 +132,11 @@ if not logger.handlers:
     _file.setFormatter(_fmt)
     logger.addHandler(_file)
 
+trading_client = None
+data_client = None
+DRY_RUN = False
+
+
 def notify(message: str) -> None:
     logger.info(message)
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -143,7 +148,6 @@ def notify(message: str) -> None:
         "parse_mode": "Markdown",
     }
     
-    # PythonAnywhere Proxy explizit vorgeben
     proxies = {
         "http": "http://proxy.server:3128",
         "https": "http://proxy.server:3128",
