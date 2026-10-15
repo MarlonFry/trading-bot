@@ -1,5 +1,6 @@
 """
-Smart Trading Bot v4.6 Power-Trend (Alpaca, 8 Ticker, VWAP, High-Risk Sizing & Custom Telegram Report)
+Smart Trading Bot v5.0 Aggressive Power-Trend (Alpaca, 8 Ticker, Dynamic %-Sizing)
+Entworfen für hohes Renditepotenzial (Zinseszins durch 2.5% Risiko pro Trade).
 """
 
 from __future__ import annotations
@@ -67,17 +68,17 @@ DATA_FEED_NAME = os.getenv("BOT_DATA_FEED", "iex").lower()
 BAR_MINUTES = 15
 TF_INTRADAY = TimeFrame(BAR_MINUTES, TimeFrameUnit.Minute)
 
-# Indikatoren & Ausstieg (Power-Trend Setup)
+# Aggressive Indikatoren & Ausstieg
 RSI_PERIOD = 14
-RSI_ENTRY_MAX = 50
-RSI_ENTRY_CEIL = 58
+RSI_ENTRY_MAX = 52
+RSI_ENTRY_CEIL = 60
 EMA_FAST = 20
 EMA_SLOW = 50
 ATR_PERIOD = 14
 VOL_LOOKBACK = 20
-MIN_REL_VOLUME = 0.8            # Verschärfter Volumen-Filter gegen Fehlsignale
-MIN_ATR_PCT = 0.001
-MAX_ATR_PCT = 0.04
+MIN_REL_VOLUME = 1.0            # Hohe Volumenschwelle: Nur echte Ausbrüche
+MIN_ATR_PCT = 0.0015
+MAX_ATR_PCT = 0.05
 
 D_EMA_FAST = 20
 D_EMA_SLOW = 50
@@ -92,19 +93,20 @@ NY_TZ = "America/New_York"
 NY = ZoneInfo(NY_TZ)
 
 ATR_STOP_MULTIPLIER = 2.0
-ATR_TARGET_MULTIPLIER = 6.0     # Power-Trend Target für maximale Gewinne
+ATR_TARGET_MULTIPLIER = 4.0     # Optimaler R-Multiple für starke Trends
 BREAKEVEN_R = 1.0
-TRAIL_START_R = 2.0
+TRAIL_START_R = 1.8
 TRAIL_ATR_MULTIPLIER = 1.0
 MAX_HOLD_DAYS = 5
-COOLDOWN_MINUTES = 30
+COOLDOWN_MINUTES = 20
 
-# High-Risk / High-Reward Sizing Setup
+# DYNAMISCHES PROZENT-RISIKO (High-Reward Sizing)
+RISK_PCT_PER_TRADE = 0.025      # 2.5% des Gesamtkontos pro Trade riskieren
 MAX_POSITION_FRACTION = 0.95
 MAX_TOTAL_EXPOSURE = 0.95
-MAX_OPEN_POSITIONS = 4
-MAX_DAILY_LOSS = 0.15
-MAX_DRAWDOWN = 0.30
+MAX_OPEN_POSITIONS = 3
+MAX_DAILY_LOSS = 0.10
+MAX_DRAWDOWN = 0.25
 MIN_ORDER_VALUE = 10.0
 LOSS_STREAK_THROTTLE = 3
 LOSS_STREAK_RISK_FACTOR = 0.5
@@ -123,7 +125,7 @@ STARTING_CAPITAL = 100_000.0
 
 
 # ============================================================
-# 2. LOGGING & ROBUSFE TELEGRAM-FUNKTION
+# 2. LOGGING & TELEGRAM-PROXIES
 # ============================================================
 
 logger = logging.getLogger("smart_bot")
@@ -181,7 +183,7 @@ def notify(message: str) -> None:
 
 
 # ============================================================
-# 3. STATE-MANAGEMENT & DYNAMISCHES RISIKO
+# 3. STATE-MANAGEMENT
 # ============================================================
 
 class BotState:
@@ -234,13 +236,6 @@ class BotState:
     def risk_factor(self) -> float:
         if self.stats["consecutive_losses"] >= LOSS_STREAK_THROTTLE:
             return LOSS_STREAK_RISK_FACTOR
-        recent = self.stats.get("recent_results", [])[-10:]
-        if len(recent) >= 5:
-            win_rate = sum(float(x) > 0 for x in recent) / len(recent)
-            if win_rate >= 0.6:
-                return 1.2
-            elif win_rate <= 0.3:
-                return 0.8
         return 1.0
 
     def record_result(self, r_multiple: float) -> None:
@@ -454,7 +449,7 @@ def build_signals(
 
 
 # ============================================================
-# 5. POSITION SIZING
+# 5. DYNAMISCHES PROZENT-SIZING (ZINSESZINS)
 # ============================================================
 
 def position_size(
@@ -466,6 +461,9 @@ def position_size(
     risk_factor: float,
     score: float,
 ) -> int:
+    """
+    Berechnet die Stückzahl dynamisch auf Basis von 2.5% des Konto-Gesamtkapitals.
+    """
     values = [equity, cash, price, atr, risk_factor]
     if not all(math.isfinite(v) for v in values) or min(equity, cash, price, atr) <= 0:
         return 0
@@ -474,15 +472,9 @@ def position_size(
     if not math.isfinite(stop_distance) or stop_distance <= 0:
         return 0
 
-    if score >= 70:
-        target_risk = 50.0
-    elif score >= 55:
-        target_risk = 35.0
-    else:
-        target_risk = 20.0
-
-    effective_risk = target_risk * risk_factor
-    qty_by_risk = int(effective_risk / stop_distance)
+    # Dynamisches Prozentrisiko (2.5% von Equity)
+    target_risk = equity * RISK_PCT_PER_TRADE * risk_factor
+    qty_by_risk = int(target_risk / stop_distance)
 
     exposure_budget = max(0.0, equity * MAX_TOTAL_EXPOSURE - current_exposure)
     position_cap = equity * MAX_POSITION_FRACTION
@@ -496,7 +488,7 @@ def position_size(
 
 
 # ============================================================
-# 6. BROKER-FUNKTIONEN & ORDER MANAGEMENT
+# 6. BROKER & ORDER MANAGEMENT
 # ============================================================
 
 def require_clients() -> tuple[TradingClient, StockHistoricalDataClient]:
@@ -539,7 +531,7 @@ def submit_entry(symbol: str, qty: int, price: float, atr: float, bar_time: pd.T
     if qty <= 0 or stop <= 0 or stop >= price or target <= price:
         return False
 
-    client_id = f"smartv46-{symbol}-{int(bar_time.timestamp())}"[:48]
+    client_id = f"smartv50-{symbol}-{int(bar_time.timestamp())}"[:48]
     request = MarketOrderRequest(
         symbol=symbol,
         qty=qty,
@@ -556,8 +548,8 @@ def submit_entry(symbol: str, qty: int, price: float, atr: float, bar_time: pd.T
         logger.exception("%s: Order-Übermittlung fehlgeschlagen.", symbol)
         return False
 
-    fisch_label = "🔥 **HIGH-RISK FETTER FISCH!**" if score >= 70 else ("🎯 Solides Signal" if score >= 55 else "⚡ Standard-Signal")
     kauf_zeit = ny_now().strftime("%d.%m.%Y um %H:%M Uhr")
+    max_risk_val = abs(price - stop) * qty
 
     state.trades[symbol] = {
         "order_id": str(submitted.id),
@@ -578,13 +570,14 @@ def submit_entry(symbol: str, qty: int, price: float, atr: float, bar_time: pd.T
     state.save()
 
     notify(
-        f"🟢 **GEKAUFT: {symbol}** ({fisch_label})\n"
+        f"🟢 **GEKAUFT: {symbol}**\n"
         f"🕒 **Zeitpunkt:** {kauf_zeit}\n"
         f"• **Score:** {score:.0f}/100\n"
         f"• **Menge:** {qty} Stück\n"
         f"• **Kaufpreis:** ${price:.2f}\n"
         f"• **Stop-Loss:** ${stop:.2f}\n"
-        f"• **Max-Risiko:** ${abs(price - stop) * qty:.2f}"
+        f"• **Take-Profit:** ${target:.2f}\n"
+        f"• **Max-Risiko:** ${max_risk_val:.2f} (2.5% Equity)"
     )
     return True
 
@@ -628,7 +621,7 @@ def modify_stop(symbol: str, new_stop: float, open_orders: list[Any]) -> bool:
 
 
 # ============================================================
-# 7. RECONCILIATION & POSITIONS-VERWALTUNG
+# 7. POSITIONS-MONITORING
 # ============================================================
 
 def reconcile_trades(positions: dict[str, Any], open_orders: list[Any]) -> None:
@@ -735,13 +728,13 @@ def manage_positions(positions: dict[str, Any], open_orders: list[Any]) -> None:
                 if modify_stop(symbol, desired, open_orders):
                     trade["stop"] = desired
                     state.save()
-                    notify(f"🔼 **{symbol}**: Stop auf ${desired:.2f} nachgezogen ({r_multiple:+.2f}R). Runner läuft!")
+                    notify(f"🔼 **{symbol}**: Stop auf ${desired:.2f} nachgezogen ({r_multiple:+.2f}R).")
         except Exception:
             logger.exception("%s: Fehler bei Positionsverwaltung.", symbol)
 
 
 # ============================================================
-# 8. EINSTIEGSSUCHE & TAGESKONTEXT
+# 8. EINSTIEGSSUCHE & ANPASSUNG
 # ============================================================
 
 _daily_cache: dict[str, Any] = {"date": None, "contexts": {}}
@@ -808,10 +801,6 @@ def scan_for_entries(account: Any, positions: dict[str, Any], open_orders: list[
             state.save()
 
             last = signals.iloc[-1]
-            logger.info(
-                "%s | Kurs %.2f | VWAP %.2f | RSI %.1f | Score %.0f | Signal=%s",
-                symbol, last["close"], last["vwap"], last["rsi"], last["score"], bool(last["signal"])
-            )
             if bool(last["signal"]):
                 candidates.append((
                     float(last["score"]), symbol, float(last["close"]),
@@ -839,7 +828,7 @@ def scan_for_entries(account: Any, positions: dict[str, Any], open_orders: list[
 
 
 # ============================================================
-# 9. HAUPTSCHLEIFE & ANGEPASSTER TAGESBERICHT
+# 9. EXAKTER TELEGRAM-TAGESBERICHT
 # ============================================================
 
 def maybe_daily_summary(account: Any, daily_return: float, drawdown: float) -> None:
@@ -852,18 +841,18 @@ def maybe_daily_summary(account: Any, daily_return: float, drawdown: float) -> N
 
         if pnl >= 0:
             profit_str = f"🟩 **Tagesprofit:** +${pnl:,.2f}"
-            loss_str = "libre"
-            loss_line = "🟥 **Tagesverlust:** $0.00"
+            loss_line = "ff"
+            loss_str = "🟥 **Tagesverlust:** $0.00"
         else:
             profit_str = "🟩 **Tagesprofit:** $0.00"
-            loss_line = f"🟥 **Tagesverlust:** -${abs(pnl):,.2f}"
+            loss_str = f"🟥 **Tagesverlust:** -${abs(pnl):,.2f}"
 
         stats = state.stats
         notify(
             f"📊 **Tagesbericht**\n"
             f"• **Kontostand:** ${equity:,.2f}\n"
             f"• {profit_str}\n"
-            f"• {loss_line}\n"
+            f"• {loss_str}\n"
             f"• **Max. Rücksetzer:** {drawdown:.2%}\n"
             f"• **Trades Gesamt:** {stats['wins']}W / {stats['losses']}L\n"
             f"• **Performance:** {stats['total_r']:+.1f}R"
@@ -901,7 +890,7 @@ def run_cycle() -> int:
 
 def live_main() -> None:
     init_clients()
-    notify(f"🚀 **Bot gestartet** (v4.6 Power-Trend - Custom Report)\nBeobachte: {', '.join(TICKERS)}")
+    notify(f"🚀 **Bot gestartet** (v5.0 Aggressive %-Sizing)\nBeobachte: {', '.join(TICKERS)}")
     consecutive_errors = 0
     while True:
         sleep_for = POLL_SECONDS
@@ -914,8 +903,6 @@ def live_main() -> None:
         except Exception:
             consecutive_errors += 1
             logger.exception("Fehler in Hauptschleife.")
-            if consecutive_errors in (3, 10, 20):
-                notify(f"⚠️ **Achtung**: {consecutive_errors} Fehler in Folge.")
             sleep_for = min(POLL_SECONDS * (2 ** min(consecutive_errors, 4)), 600)
         time.sleep(sleep_for)
 
@@ -1083,14 +1070,14 @@ def run_backtest(days: int) -> None:
         raise SystemExit("Keine Daten für Backtest verfügbar.")
 
     result = simulate(frames)
-    print("\n=========== BACKTEST v4.6 Power-Trend ===========")
+    print("\n=========== BACKTEST v5.0 Aggressive Power-Trend ===========")
     print(f"Trades: {result['n_trades']}")
     if result["n_trades"]:
         print(f"Trefferquote: {result.get('win_rate', 0):.1%} | Ø Ergebnis: {result.get('avg_r', 0):+.2f}R | Rendite: {result.get('total_return', 0):+.2%} | Max. Drawdown: {result.get('max_drawdown', 0):.2%}")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Smart Trading Bot v4.6 Power-Trend")
+    parser = argparse.ArgumentParser(description="Smart Trading Bot v5.0")
     parser.add_argument("--backtest", action="store_true")
     parser.add_argument("--days", type=int, default=120)
     args = parser.parse_args()
