@@ -1,6 +1,6 @@
 """
-Smart Trading Bot v5.0 Aggressive Power-Trend (Alpaca, 8 Ticker, Dynamic %-Sizing)
-Entworfen für hohes Renditepotenzial (Zinseszins durch 2.5% Risiko pro Trade).
+Smart Trading Bot v6.0 High-Conviction Power-Trend
+Optimiert auf positiven Erwartungswert, höhere Trefferquote und sicheren Zinseszins.
 """
 
 from __future__ import annotations
@@ -68,17 +68,17 @@ DATA_FEED_NAME = os.getenv("BOT_DATA_FEED", "iex").lower()
 BAR_MINUTES = 15
 TF_INTRADAY = TimeFrame(BAR_MINUTES, TimeFrameUnit.Minute)
 
-# Aggressive Indikatoren & Ausstieg
+# Indikatoren & Ausstieg (Präzisions-Setup)
 RSI_PERIOD = 14
-RSI_ENTRY_MAX = 52
-RSI_ENTRY_CEIL = 60
+RSI_ENTRY_MAX = 50
+RSI_ENTRY_CEIL = 58
 EMA_FAST = 20
 EMA_SLOW = 50
 ATR_PERIOD = 14
 VOL_LOOKBACK = 20
-MIN_REL_VOLUME = 1.0            # Hohe Volumenschwelle: Nur echte Ausbrüche
+MIN_REL_VOLUME = 1.2            # Strikter Volumen-Filter für echte Impulse
 MIN_ATR_PCT = 0.0015
-MAX_ATR_PCT = 0.05
+MAX_ATR_PCT = 0.04
 
 D_EMA_FAST = 20
 D_EMA_SLOW = 50
@@ -92,21 +92,21 @@ ENTRY_BEFORE_CLOSE_MIN = 30
 NY_TZ = "America/New_York"
 NY = ZoneInfo(NY_TZ)
 
-ATR_STOP_MULTIPLIER = 2.0
-ATR_TARGET_MULTIPLIER = 4.0     # Optimaler R-Multiple für starke Trends
-BREAKEVEN_R = 1.0
-TRAIL_START_R = 1.8
+ATR_STOP_MULTIPLIER = 1.5       # Enger Stop für exzellentes CRV
+ATR_TARGET_MULTIPLIER = 3.5     # Ziel für hohes Chance-Risiko-Verhältnis (1 : 2.33)
+BREAKEVEN_R = 1.0              # Frühzeitiger Schutz auf Einstand
+TRAIL_START_R = 1.5
 TRAIL_ATR_MULTIPLIER = 1.0
-MAX_HOLD_DAYS = 5
-COOLDOWN_MINUTES = 20
+MAX_HOLD_DAYS = 4
+COOLDOWN_MINUTES = 30
 
-# DYNAMISCHES PROZENT-RISIKO (High-Reward Sizing)
-RISK_PCT_PER_TRADE = 0.025      # 2.5% des Gesamtkontos pro Trade riskieren
+# Ausgewogenes Risiko für sicheren Zinseszins
+RISK_PCT_PER_TRADE = 0.015      # 1.5% des Kontos pro Trade
 MAX_POSITION_FRACTION = 0.95
 MAX_TOTAL_EXPOSURE = 0.95
 MAX_OPEN_POSITIONS = 3
-MAX_DAILY_LOSS = 0.10
-MAX_DRAWDOWN = 0.25
+MAX_DAILY_LOSS = 0.08
+MAX_DRAWDOWN = 0.20
 MIN_ORDER_VALUE = 10.0
 LOSS_STREAK_THROTTLE = 3
 LOSS_STREAK_RISK_FACTOR = 0.5
@@ -125,7 +125,7 @@ STARTING_CAPITAL = 100_000.0
 
 
 # ============================================================
-# 2. LOGGING & TELEGRAM-PROXIES
+# 2. LOGGING & TELEGRAM
 # ============================================================
 
 logger = logging.getLogger("smart_bot")
@@ -290,7 +290,7 @@ def init_clients() -> None:
 
 
 # ============================================================
-# 4. MARKTDATEN & INDIKATOREN
+# 4. MARKTDATEN & PRÄZISIONS-INDIKATOREN
 # ============================================================
 
 def fetch_bars(symbols: list[str] | tuple[str, ...], timeframe: Any, start: datetime) -> dict[str, pd.DataFrame]:
@@ -385,7 +385,7 @@ def daily_context(daily: pd.DataFrame) -> pd.DataFrame:
     result = pd.DataFrame({
         "day": days.values.astype("datetime64[ns]"),
         "trend_ok": ((close > sma) & (ema_fast > ema_slow)).to_numpy(),
-        "regime_ok": (close > regime_ema).to_numpy(),
+        "regime_ok": ((close > sma) & (close > regime_ema) & (ema_fast > ema_slow)).to_numpy(),
     })
     return result.drop_duplicates("day", keep="last").sort_values("day").reset_index(drop=True)
 
@@ -449,7 +449,7 @@ def build_signals(
 
 
 # ============================================================
-# 5. DYNAMISCHES PROZENT-SIZING (ZINSESZINS)
+# 5. DYNAMISCHES PROZENT-SIZING
 # ============================================================
 
 def position_size(
@@ -461,9 +461,6 @@ def position_size(
     risk_factor: float,
     score: float,
 ) -> int:
-    """
-    Berechnet die Stückzahl dynamisch auf Basis von 2.5% des Konto-Gesamtkapitals.
-    """
     values = [equity, cash, price, atr, risk_factor]
     if not all(math.isfinite(v) for v in values) or min(equity, cash, price, atr) <= 0:
         return 0
@@ -472,7 +469,6 @@ def position_size(
     if not math.isfinite(stop_distance) or stop_distance <= 0:
         return 0
 
-    # Dynamisches Prozentrisiko (2.5% von Equity)
     target_risk = equity * RISK_PCT_PER_TRADE * risk_factor
     qty_by_risk = int(target_risk / stop_distance)
 
@@ -488,7 +484,7 @@ def position_size(
 
 
 # ============================================================
-# 6. BROKER & ORDER MANAGEMENT
+# 6. ORDERS & BROKER
 # ============================================================
 
 def require_clients() -> tuple[TradingClient, StockHistoricalDataClient]:
@@ -531,7 +527,7 @@ def submit_entry(symbol: str, qty: int, price: float, atr: float, bar_time: pd.T
     if qty <= 0 or stop <= 0 or stop >= price or target <= price:
         return False
 
-    client_id = f"smartv50-{symbol}-{int(bar_time.timestamp())}"[:48]
+    client_id = f"smartv60-{symbol}-{int(bar_time.timestamp())}"[:48]
     request = MarketOrderRequest(
         symbol=symbol,
         qty=qty,
@@ -577,7 +573,7 @@ def submit_entry(symbol: str, qty: int, price: float, atr: float, bar_time: pd.T
         f"• **Kaufpreis:** ${price:.2f}\n"
         f"• **Stop-Loss:** ${stop:.2f}\n"
         f"• **Take-Profit:** ${target:.2f}\n"
-        f"• **Max-Risiko:** ${max_risk_val:.2f} (2.5% Equity)"
+        f"• **Max-Risiko:** ${max_risk_val:.2f} (1.5% Equity)"
     )
     return True
 
@@ -621,7 +617,7 @@ def modify_stop(symbol: str, new_stop: float, open_orders: list[Any]) -> bool:
 
 
 # ============================================================
-# 7. POSITIONS-MONITORING
+# 7. RECONCILIATION & POSITIONS-VERWALTUNG
 # ============================================================
 
 def reconcile_trades(positions: dict[str, Any], open_orders: list[Any]) -> None:
@@ -734,7 +730,7 @@ def manage_positions(positions: dict[str, Any], open_orders: list[Any]) -> None:
 
 
 # ============================================================
-# 8. EINSTIEGSSUCHE & ANPASSUNG
+# 8. EINSTIEGSSUCHE & TAGESKONTEXT
 # ============================================================
 
 _daily_cache: dict[str, Any] = {"date": None, "contexts": {}}
@@ -828,7 +824,7 @@ def scan_for_entries(account: Any, positions: dict[str, Any], open_orders: list[
 
 
 # ============================================================
-# 9. EXAKTER TELEGRAM-TAGESBERICHT
+# 9. TAGESBERICHT
 # ============================================================
 
 def maybe_daily_summary(account: Any, daily_return: float, drawdown: float) -> None:
@@ -841,7 +837,6 @@ def maybe_daily_summary(account: Any, daily_return: float, drawdown: float) -> N
 
         if pnl >= 0:
             profit_str = f"🟩 **Tagesprofit:** +${pnl:,.2f}"
-            loss_line = "ff"
             loss_str = "🟥 **Tagesverlust:** $0.00"
         else:
             profit_str = "🟩 **Tagesprofit:** $0.00"
@@ -890,7 +885,7 @@ def run_cycle() -> int:
 
 def live_main() -> None:
     init_clients()
-    notify(f"🚀 **Bot gestartet** (v5.0 Aggressive %-Sizing)\nBeobachte: {', '.join(TICKERS)}")
+    notify(f"🚀 **Bot gestartet** (v6.0 High-Conviction Power-Trend)\nBeobachte: {', '.join(TICKERS)}")
     consecutive_errors = 0
     while True:
         sleep_for = POLL_SECONDS
@@ -1070,14 +1065,14 @@ def run_backtest(days: int) -> None:
         raise SystemExit("Keine Daten für Backtest verfügbar.")
 
     result = simulate(frames)
-    print("\n=========== BACKTEST v5.0 Aggressive Power-Trend ===========")
+    print("\n=========== BACKTEST v6.0 High-Conviction Power-Trend ===========")
     print(f"Trades: {result['n_trades']}")
     if result["n_trades"]:
         print(f"Trefferquote: {result.get('win_rate', 0):.1%} | Ø Ergebnis: {result.get('avg_r', 0):+.2f}R | Rendite: {result.get('total_return', 0):+.2%} | Max. Drawdown: {result.get('max_drawdown', 0):.2%}")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Smart Trading Bot v5.0")
+    parser = argparse.ArgumentParser(description="Smart Trading Bot v6.0")
     parser.add_argument("--backtest", action="store_true")
     parser.add_argument("--days", type=int, default=120)
     args = parser.parse_args()
