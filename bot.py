@@ -1,17 +1,21 @@
 """
-Smart Trading Bot v3.4 (Alpaca, 8 Ticker, VWAP, High-Risk Sizing, Robust Telegram Proxy)
+Smart Trading Bot v4.5 Hybrid (Alpaca, 8 Ticker, VWAP, High-Risk Sizing & PA Proxy Fix)
+Vereint die saubere v4-Engine mit der v3.4 High-Risk Logik ($20-$50 Risk, 95% Exposure).
 """
+
 from __future__ import annotations
 
 import argparse
 import json
 import logging
+import math
 import os
 import sys
 import time
 from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -30,36 +34,41 @@ try:
     from alpaca.data.requests import StockBarsRequest
     from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
     from alpaca.trading.client import TradingClient
-    from alpaca.trading.enums import OrderClass, OrderSide, QueryOrderStatus, TimeInForce
+    from alpaca.trading.enums import (
+        OrderClass, OrderSide, QueryOrderStatus, TimeInForce
+    )
     from alpaca.trading.requests import (
-        GetOrdersRequest,
-        MarketOrderRequest,
-        ReplaceOrderRequest,
-        StopLossRequest,
-        TakeProfitRequest,
+        GetOrdersRequest, MarketOrderRequest, ReplaceOrderRequest,
+        StopLossRequest, TakeProfitRequest,
     )
     ALPACA_OK = True
-    ALPACA_ERR: Exception | None = None
-except ImportError as _exc:
-    ALPACA_OK = False
-    ALPACA_ERR = _exc
+except ImportError as exc:
+    raise SystemExit(
+        "Fehlende Abhängigkeiten. Bitte installieren mit: pip install alpaca-py pandas numpy requests python-dotenv"
+    ) from exc
 
 
 # ============================================================
-# 1. KONFIGURATION & TELEGRAM KEYS
+# 1. KONFIGURATION & CREDENTIALS
 # ============================================================
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or "8661524937:AAF8MQkKVggFYDiFQrYTyjxQLG4zLBVam2Q"
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or "8859741833"
 
-TICKERS = ["AAPL", "NVDA", "TSLA", "MSFT", "AMD", "AMZN", "META", "GOOGL"]
-REGIME_SYMBOL = "SPY"
+ALPACA_KEY = os.getenv("ALPACA_API_KEY") or "PKNPBIXR7TIVOYWUONFKDOEGF4"
+ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY") or "9JqMriM1LHLsae3MppsBY97PHmWMhHEnHpQBzMvEgFeC"
 
-BAR_MINUTES = 15
-TF_INTRADAY = TimeFrame(BAR_MINUTES, TimeFrameUnit.Minute) if ALPACA_OK else None
+TICKERS = tuple(x.strip().upper() for x in os.getenv(
+    "BOT_TICKERS", "AAPL,NVDA,TSLA,MSFT,AMD,AMZN,META,GOOGL"
+).split(",") if x.strip())
+REGIME_SYMBOL = os.getenv("BOT_REGIME_SYMBOL", "SPY").upper()
+
+PAPER = os.getenv("BOT_PAPER", "1").strip() != "0"
 DATA_FEED_NAME = os.getenv("BOT_DATA_FEED", "iex").lower()
+BAR_MINUTES = 15
+TF_INTRADAY = TimeFrame(BAR_MINUTES, TimeFrameUnit.Minute)
 
-# --- Einstiegsstrategie ---
+# Indikatoren & Ausstieg
 RSI_PERIOD = 14
 RSI_ENTRY_MAX = 50
 RSI_ENTRY_CEIL = 58
@@ -68,77 +77,85 @@ EMA_SLOW = 50
 ATR_PERIOD = 14
 VOL_LOOKBACK = 20
 MIN_REL_VOLUME = 0.5
-MIN_ATR_PCT = 0.0010
+MIN_ATR_PCT = 0.001
 MAX_ATR_PCT = 0.04
 
-# --- Tageskontext ---
 D_EMA_FAST = 20
 D_EMA_SLOW = 50
 D_SMA_TREND = 200
 REGIME_EMA = 50
 
-# --- Handelszeiten (US-Börsenzeit) ---
-SESSION_OPEN = 9 * 60 + 30
-SESSION_CLOSE = 16 * 60
+SESSION_OPEN_MIN = 9 * 60 + 30
+SESSION_CLOSE_MIN = 16 * 60
 ENTRY_AFTER_OPEN_MIN = 30
 ENTRY_BEFORE_CLOSE_MIN = 30
+NY_TZ = "America/New_York"
+NY = ZoneInfo(NY_TZ)
 
-# --- Ausstieg ---
 ATR_STOP_MULTIPLIER = 2.0
 ATR_TARGET_MULTIPLIER = 4.5
 BREAKEVEN_R = 1.0
 TRAIL_START_R = 1.8
+TRAIL_ATR_MULTIPLIER = 0.8
 MAX_HOLD_DAYS = 5
 COOLDOWN_MINUTES = 30
 
-# --- Risikomanagement (High-Risk Anpassung) ---
-MAX_POSITION_FRACTION = 0.95   # Fast 100% des Kontos für einen Trade erlaubt
-MAX_TOTAL_EXPOSURE = 0.95      # Gesamtes Geld darf im Markt sein
+# High-Risk / High-Reward Setup (v3.4 Sizing)
+MAX_POSITION_FRACTION = 0.95     # Bis zu 95% des Kontos für eine Position erlaubt
+MAX_TOTAL_EXPOSURE = 0.95        # Bis zu 95% Gesamtexposure
 MAX_OPEN_POSITIONS = 4
-MAX_DAILY_LOSS = 0.15          # Tagesverlust-Grenze auf 15% gelockert
-MAX_DRAWDOWN = 0.30            # Drawdown-Limit auf 30% gelockert
+MAX_DAILY_LOSS = 0.15            # 15% Tagesverlust-Schwelle
+MAX_DRAWDOWN = 0.30              # 30% Max Drawdown
+MIN_ORDER_VALUE = 10.0
 LOSS_STREAK_THROTTLE = 3
 LOSS_STREAK_RISK_FACTOR = 0.5
-MIN_ORDER_VALUE = 10.0         # Blockade für kleine Orders entfernt
 
 POLL_SECONDS = 60
 POLL_SECONDS_CLOSED = 300
 MAX_BAR_LAG_MINUTES = 30
 INTRADAY_LOOKBACK_DAYS = 12
 DAILY_LOOKBACK_DAYS = 430
-MIN_BARS = EMA_SLOW + VOL_LOOKBACK
-STATE_FILE = Path("smart_bot_state.json")
-LOG_FILE = "smart_bot.log"
+MIN_BARS = EMA_SLOW + VOL_LOOKBACK + 5
 
-STARTING_CAPITAL = 100_000.0
+STATE_FILE = Path(os.getenv("BOT_STATE_FILE", "smart_bot_state.json"))
+LOG_FILE = os.getenv("BOT_LOG_FILE", "smart_bot.log")
 SLIPPAGE_BPS = 5.0
-
-NY_TZ = "America/New_York"
-NY = ZoneInfo(NY_TZ)
+STARTING_CAPITAL = 100_000.0
 
 
 # ============================================================
-# 2. LOGGING, CLIENTS & BENACHRICHTIGUNG
+# 2. LOGGING & ROBUSFE TELEGRAM-FUNKTION
 # ============================================================
 
 logger = logging.getLogger("smart_bot")
 logger.setLevel(logging.INFO)
-_fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
 if not logger.handlers:
-    _console = logging.StreamHandler()
-    _console.setFormatter(_fmt)
-    logger.addHandler(_console)
-    _file = RotatingFileHandler(LOG_FILE, maxBytes=2_000_000, backupCount=5, encoding="utf-8")
-    _file.setFormatter(_fmt)
-    logger.addHandler(_file)
+    fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+    console = logging.StreamHandler()
+    console.setFormatter(fmt)
+    logger.addHandler(console)
+    file_handler = RotatingFileHandler(
+        LOG_FILE, maxBytes=2_000_000, backupCount=5, encoding="utf-8"
+    )
+    file_handler.setFormatter(fmt)
+    logger.addHandler(file_handler)
 
-trading_client = None
-data_client = None
-DRY_RUN = False
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def ny_now() -> datetime:
+    return datetime.now(NY)
+
+
+def enum_value(value: Any) -> str:
+    return str(getattr(value, "value", value)).lower()
 
 
 def notify(message: str) -> None:
-    logger.info(message)
+    """Sendet Telegram-Nachrichten mit PythonAnywhere-Proxy-Fix und Retry-Schleife."""
+    logger.info("%s", message)
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -148,6 +165,7 @@ def notify(message: str) -> None:
         "parse_mode": "Markdown",
     }
     
+    # Expliziter Proxy-Fix für PythonAnywhere Free Tier
     proxies = {
         "http": "http://proxy.server:3128",
         "https": "http://proxy.server:3128",
@@ -155,8 +173,8 @@ def notify(message: str) -> None:
     
     for attempt in range(5):
         try:
-            r = requests.post(url, json=payload, proxies=proxies, timeout=15)
-            r.raise_for_status()
+            response = requests.post(url, json=payload, proxies=proxies, timeout=15)
+            response.raise_for_status()
             return
         except requests.RequestException as exc:
             if attempt < 4:
@@ -165,42 +183,23 @@ def notify(message: str) -> None:
                 logger.error("Telegram-Fehler nach 5 Versuchen: %s", exc)
 
 
-def init_clients() -> None:
-    global trading_client, data_client
-    if not ALPACA_OK:
-        sys.exit(f"alpaca-py fehlt: {ALPACA_ERR}")
-
-    key = os.getenv("ALPACA_API_KEY") or "PKNPBIXR7TIVOYWUONFKDOEGF4"
-    secret = os.getenv("ALPACA_SECRET_KEY") or "9JqMriM1LHLsae3MppsBY97PHmWMhHEnHpQBzMvEgFeC"
-
-    if not key or not secret:
-        sys.exit("ALPACA Keys fehlen.")
-    paper = os.getenv("BOT_PAPER", "1") != "0"
-    trading_client = TradingClient(key, secret, paper=paper)
-    data_client = StockHistoricalDataClient(key, secret)
-
-
-def _val(x) -> str:
-    return str(getattr(x, "value", x)).lower()
-
-def ny_now() -> datetime:
-    return datetime.now(NY)
-
-
 # ============================================================
-# 3. ZUSTAND & DYNAMISCHES RISIKO
+# 3. STATE-MANAGEMENT & DYNAMISCHES RISIKO
 # ============================================================
 
 class BotState:
     def __init__(self, path: Path):
         self.path = path
-        self.data: dict = {
-            "day": {},
+        self.data: dict[str, Any] = {
+            "day": {"date": "", "base_equity": 0.0, "halted": False},
             "peak_equity": 0.0,
             "kill_switch": False,
             "kill_reason": "",
             "trades": {},
-            "stats": {"wins": 0, "losses": 0, "consecutive_losses": 0, "total_r": 0.0, "recent_results": []},
+            "stats": {
+                "wins": 0, "losses": 0, "consecutive_losses": 0,
+                "total_r": 0.0, "recent_results": []
+            },
             "last_bar": {},
             "cooldown": {},
             "summary_date": "",
@@ -211,293 +210,382 @@ class BotState:
         if not self.path.exists():
             return
         try:
-            self.data.update(json.loads(self.path.read_text(encoding="utf-8")))
-            if "recent_results" not in self.data["stats"]:
-                self.data["stats"]["recent_results"] = []
-        except (OSError, json.JSONDecodeError):
-            pass
+            loaded = json.loads(self.path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                for key, value in loaded.items():
+                    if key in self.data and isinstance(value, dict) and isinstance(self.data[key], dict):
+                        self.data[key].update(value)
+                    else:
+                        self.data[key] = value
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.exception("Fehler beim Laden des State-Files: %s", exc)
 
     def save(self) -> None:
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.data, indent=2), encoding="utf-8")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+        tmp.write_text(json.dumps(self.data, indent=2, default=str), encoding="utf-8")
         tmp.replace(self.path)
 
     @property
-    def trades(self) -> dict:
+    def trades(self) -> dict[str, Any]:
         return self.data["trades"]
 
     @property
-    def stats(self) -> dict:
+    def stats(self) -> dict[str, Any]:
         return self.data["stats"]
 
     def risk_factor(self) -> float:
-        factor = 1.0
         if self.stats["consecutive_losses"] >= LOSS_STREAK_THROTTLE:
             return LOSS_STREAK_RISK_FACTOR
-        
-        rec = self.stats.get("recent_results", [])
-        if len(rec) >= 5:
-            win_rate = sum(1 for r in rec if r > 0) / len(rec)
+        recent = self.stats.get("recent_results", [])[-10:]
+        if len(recent) >= 5:
+            win_rate = sum(float(x) > 0 for x in recent) / len(recent)
             if win_rate >= 0.6:
-                factor = 1.2
+                return 1.2
             elif win_rate <= 0.3:
-                factor = 0.8
-        return factor
+                return 0.8
+        return 1.0
 
     def record_result(self, r_multiple: float) -> None:
-        s = self.stats
-        s["total_r"] = round(s["total_r"] + r_multiple, 3)
-        rec = s.setdefault("recent_results", [])
-        rec.append(r_multiple)
-        if len(rec) > 10:
-            rec.pop(0)
-
+        stats = self.stats
+        stats["total_r"] = round(float(stats["total_r"]) + r_multiple, 3)
+        recent = stats.setdefault("recent_results", [])
+        recent.append(float(r_multiple))
+        del recent[:-10]
         if r_multiple < -0.05:
-            s["losses"] += 1
-            s["consecutive_losses"] += 1
+            stats["losses"] += 1
+            stats["consecutive_losses"] += 1
         elif r_multiple > 0.05:
-            s["wins"] += 1
-            s["consecutive_losses"] = 0
+            stats["wins"] += 1
+            stats["consecutive_losses"] = 0
 
     def update_risk(self, equity: float, last_equity: float | None) -> tuple[float, float]:
         today = ny_now().date().isoformat()
         day = self.data["day"]
         if day.get("date") != today:
             base = last_equity if last_equity and last_equity > 0 else equity
-            self.data["day"] = day = {"date": today, "base_equity": base, "halted": False}
-        daily_ret = equity / day["base_equity"] - 1
+            self.data["day"] = {"date": today, "base_equity": base, "halted": False}
+            day = self.data["day"]
 
-        if daily_ret <= -MAX_DAILY_LOSS and not day["halted"]:
+        base_equity = float(day.get("base_equity") or equity)
+        daily_return = equity / base_equity - 1 if base_equity > 0 else 0.0
+        if daily_return <= -MAX_DAILY_LOSS and not day.get("halted", False):
             day["halted"] = True
-            notify(f"🛑 **Tagesverlustlimit erreicht** ({daily_ret:.2%}).")
+            notify(f"🛑 **Tagesverlustlimit erreicht** ({daily_return:.2%}). Keine neuen Einstiege heute.")
 
-        self.data["peak_equity"] = max(self.data["peak_equity"], equity)
-        drawdown = equity / self.data["peak_equity"] - 1
+        self.data["peak_equity"] = max(float(self.data["peak_equity"]), equity)
+        peak = float(self.data["peak_equity"])
+        drawdown = equity / peak - 1 if peak > 0 else 0.0
         if drawdown <= -MAX_DRAWDOWN and not self.data["kill_switch"]:
             self.data["kill_switch"] = True
-            notify(f"🚨 **KILL-SWITCH AKTIVIERT**: Drawdown {drawdown:.2%}.")
+            self.data["kill_reason"] = f"Drawdown {drawdown:.2%}"
+            notify(f"🚨 **KILL-SWITCH AKTIVIERT**: Max. Drawdown {drawdown:.2%} erreicht.")
         self.save()
-        return daily_ret, drawdown
+        return daily_return, drawdown
+
 
 state = BotState(STATE_FILE)
+trading_client: TradingClient | None = None
+data_client: StockHistoricalDataClient | None = None
+
+
+def init_clients() -> None:
+    global trading_client, data_client
+    trading_client = TradingClient(ALPACA_KEY, ALPACA_SECRET, paper=PAPER)
+    data_client = StockHistoricalDataClient(ALPACA_KEY, ALPACA_SECRET)
+    account = trading_client.get_account()
+    logger.info("Alpaca verbunden. Paper=%s, Status=%s", PAPER, account.status)
 
 
 # ============================================================
-# 4. INDIKATOREN & VWAP
+# 4. MARKTDATEN & INDIKATOREN (Präziser VWAP & Next-Bar Logic)
 # ============================================================
 
-def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    close, high, low, vol = df["close"], df["high"], df["low"], df["volume"]
-
-    delta = close.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/RSI_PERIOD, adjust=False, min_periods=RSI_PERIOD).mean()
-    avg_loss = loss.ewm(alpha=1/RSI_PERIOD, adjust=False, min_periods=RSI_PERIOD).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - 100 / (1 + rs)
-    rsi[(avg_loss == 0) & (avg_gain > 0)] = 100
-    rsi[(avg_gain == 0) & (avg_loss > 0)] = 0
-    rsi[(avg_gain == 0) & (avg_loss == 0)] = 50
-    df["rsi"] = rsi
-
-    df["ema_fast"] = close.ewm(span=EMA_FAST, adjust=False).mean()
-    df["ema_slow"] = close.ewm(span=EMA_SLOW, adjust=False).mean()
-
-    prev_close = close.shift(1)
-    tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
-    df["atr"] = tr.ewm(alpha=1/ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean()
-
-    df["rel_vol"] = vol / vol.rolling(VOL_LOOKBACK).mean()
-    
-    days = pd.Series(df.index.date, index=df.index)
-    df["vwap"] = (close * vol).groupby(days).cumsum() / vol.groupby(days).cumsum()
-    
-    return df
-
-
-def regular_hours(df: pd.DataFrame) -> pd.DataFrame:
-    ny = pd.DatetimeIndex(df.index).tz_convert(NY_TZ)
-    start_min = ny.hour * 60 + ny.minute
-    return df[(start_min >= SESSION_OPEN) & (start_min < SESSION_CLOSE)]
-
-
-def daily_context(daily: pd.DataFrame) -> pd.DataFrame:
-    d = daily.sort_index()
-    idx = pd.DatetimeIndex(d.index)
-    if idx.tz is None:
-        idx = idx.tz_localize("UTC")
-    days = idx.tz_convert(NY_TZ).tz_localize(None).normalize()
-
-    close = d["close"]
-    ema_f = close.ewm(span=D_EMA_FAST, adjust=False).mean()
-    ema_s = close.ewm(span=D_EMA_SLOW, adjust=False).mean()
-    sma = close.rolling(D_SMA_TREND).mean()
-    out = pd.DataFrame(
-        {
-            "day": days.values.astype("datetime64[ns]"),
-            "trend_ok": ((close > sma) & (ema_f > ema_s)).values,
-            "regime_ok": (close > close.ewm(span=REGIME_EMA, adjust=False).mean()).values,
-        }
-    )
-    return out.drop_duplicates("day", keep="last").sort_values("day").reset_index(drop=True)
-
-
-def attach_context(index: pd.Index, ctx: pd.DataFrame | None, col: str) -> np.ndarray:
-    if ctx is None or ctx.empty:
-        return np.zeros(len(index), dtype=bool)
-    days = pd.DatetimeIndex(index).tz_convert(NY_TZ).tz_localize(None).normalize()
-    left = pd.DataFrame({"day": days.values.astype("datetime64[ns]")})
-    right = ctx[["day", col]].copy()
-    right["day"] = right["day"].astype("datetime64[ns]")
-    merged = pd.merge_asof(left, right, on="day", direction="backward", allow_exact_matches=False)
-    return merged[col].eq(True).to_numpy()
-
-
-def build_signals(df15: pd.DataFrame, ctx_symbol: pd.DataFrame | None, ctx_regime: pd.DataFrame | None) -> pd.DataFrame:
-    df = add_indicators(df15)
-    df["trend_ok"] = attach_context(df.index, ctx_symbol, "trend_ok")
-    df["regime_ok"] = attach_context(df.index, ctx_regime, "regime_ok")
-
-    ny = pd.DatetimeIndex(df.index).tz_convert(NY_TZ)
-    end_min = ny.hour * 60 + ny.minute + BAR_MINUTES
-    time_ok = (end_min >= SESSION_OPEN + ENTRY_AFTER_OPEN_MIN) & (end_min <= SESSION_CLOSE - ENTRY_BEFORE_CLOSE_MIN)
-
-    rsi_prev = df["rsi"].shift(1)
-    setup = (rsi_prev < RSI_ENTRY_MAX) & (df["rsi"] > rsi_prev) & (df["rsi"] < RSI_ENTRY_CEIL)
-    short_trend = df["ema_fast"] > df["ema_slow"]
-    confirm = df["close"] > df["open"]
-    vol_ok = df["rel_vol"] >= MIN_REL_VOLUME
-    atr_pct = df["atr"] / df["close"]
-    atr_ok = (atr_pct >= MIN_ATR_PCT) & (atr_pct <= MAX_ATR_PCT)
-    vwap_ok = df["close"] > df["vwap"]
-
-    df["signal"] = (setup & short_trend & confirm & vol_ok & atr_ok & vwap_ok & df["trend_ok"] & df["regime_ok"] & time_ok).fillna(False)
-
-    depth = ((RSI_ENTRY_MAX - rsi_prev) / RSI_ENTRY_MAX).clip(0, 1)
-    strength = ((df["ema_fast"] - df["ema_slow"]) / df["atr"]).clip(0, 2) / 2
-    volume = (df["rel_vol"] / 2).clip(0, 1)
-    df["score"] = (50 * depth + 30 * strength + 20 * volume).fillna(0.0)
-    return df
-
-
-def position_size(
-    equity: float,
-    cash: float,
-    price: float,
-    atr: float,
-    exposure: float,
-    risk_factor: float = 1.0,
-    score: float = 50.0,
-) -> int:
-    """
-    Score-basierte Positionsgrößenberechnung ("High-Risk" Logik)
-    """
-    if min(equity, price, atr) <= 0:
-        return 0
-    stop_distance = ATR_STOP_MULTIPLIER * atr
-    if stop_distance <= 0:
-        return 0
-
-    if score >= 70:
-        target_risk = 50.0  # Fetter Fisch: 50$ max Risiko
-    elif score >= 55:
-        target_risk = 35.0  # Solides Signal: 35$ max Risiko
-    else:
-        target_risk = 20.0  # Standard-Signal: 20$ max Risiko
-
-    effective_risk = target_risk * risk_factor
-
-    qty_by_risk = int(effective_risk / stop_distance)
-    
-    available = max(0.0, equity * MAX_TOTAL_EXPOSURE - exposure)
-    allowed = min(available, equity * MAX_POSITION_FRACTION, cash)
-    qty = min(qty_by_risk, int(allowed / price))
-    
-    if qty < 1 or qty * price < MIN_ORDER_VALUE:
-        return 0
-    return qty
-
-
-# ============================================================
-# 5. MARKTDATEN
-# ============================================================
-
-def fetch_bars(symbols: list[str], timeframe, start: datetime) -> dict[str, pd.DataFrame]:
+def fetch_bars(symbols: list[str] | tuple[str, ...], timeframe: Any, start: datetime) -> dict[str, pd.DataFrame]:
+    if not symbols:
+        return {}
+    assert data_client is not None
     feed = DataFeed.SIP if DATA_FEED_NAME == "sip" else DataFeed.IEX
-    req = StockBarsRequest(
+    request = StockBarsRequest(
         symbol_or_symbols=list(symbols),
         timeframe=timeframe,
         start=start,
         adjustment=Adjustment.ALL,
         feed=feed,
     )
-    raw = data_client.get_stock_bars(req).df
-    out: dict[str, pd.DataFrame] = {}
+    raw = data_client.get_stock_bars(request).df
     if raw is None or raw.empty:
-        return out
+        return {}
 
+    output: dict[str, pd.DataFrame] = {}
     required = ["open", "high", "low", "close", "volume"]
-    for sym in symbols:
-        if isinstance(raw.index, pd.MultiIndex):
-            if sym not in raw.index.get_level_values(0):
-                continue
-            df = raw.xs(sym, level=0).copy()
-        else:
-            df = raw.copy()
-        df = df.sort_index()
-        df = df[~df.index.duplicated(keep="last")]
-        df = df.dropna(subset=required)
-        df = df[df["close"] > 0]
-        if not df.empty:
-            out[sym] = df
-    return out
+    for symbol in symbols:
+        try:
+            frame = raw.xs(symbol, level=0).copy() if isinstance(raw.index, pd.MultiIndex) else raw.copy()
+        except KeyError:
+            continue
+        frame = frame.sort_index()
+        frame = frame[~frame.index.duplicated(keep="last")]
+        frame = frame.dropna(subset=required)
+        frame = frame[(frame["close"] > 0) & (frame["volume"] >= 0)]
+        if not frame.empty:
+            output[symbol] = frame
+    return output
 
-_daily_cache: dict = {"date": None, "ctx": {}}
 
-def get_daily_contexts() -> dict[str, pd.DataFrame]:
-    today = ny_now().date().isoformat()
-    if _daily_cache["date"] == today and _daily_cache["ctx"]:
-        return _daily_cache["ctx"]
-    start = datetime.now(timezone.utc) - timedelta(days=DAILY_LOOKBACK_DAYS)
-    bars = fetch_bars(TICKERS + [REGIME_SYMBOL], TimeFrame.Day, start)
-    ctx = {sym: daily_context(df) for sym, df in bars.items()}
-    _daily_cache.update(date=today, ctx=ctx)
-    return ctx
+def regular_hours(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+    idx = pd.DatetimeIndex(frame.index)
+    if idx.tz is None:
+        idx = idx.tz_localize("UTC")
+    ny_idx = idx.tz_convert(NY_TZ)
+    minutes = ny_idx.hour * 60 + ny_idx.minute
+    return frame.loc[(minutes >= SESSION_OPEN_MIN) & (minutes < SESSION_CLOSE_MIN)].copy()
+
+
+def add_indicators(frame: pd.DataFrame) -> pd.DataFrame:
+    df = frame.copy()
+    close, high, low, volume = df["close"], df["high"], df["low"], df["volume"]
+
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1 / RSI_PERIOD, adjust=False, min_periods=RSI_PERIOD).mean()
+    avg_loss = loss.ewm(alpha=1 / RSI_PERIOD, adjust=False, min_periods=RSI_PERIOD).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    df["rsi"] = 100 - 100 / (1 + rs)
+    df.loc[(avg_loss == 0) & (avg_gain > 0), "rsi"] = 100
+    df.loc[(avg_gain == 0) & (avg_loss > 0), "rsi"] = 0
+    df.loc[(avg_gain == 0) & (avg_loss == 0), "rsi"] = 50
+
+    df["ema_fast"] = close.ewm(span=EMA_FAST, adjust=False, min_periods=EMA_FAST).mean()
+    df["ema_slow"] = close.ewm(span=EMA_SLOW, adjust=False, min_periods=EMA_SLOW).mean()
+
+    previous_close = close.shift(1)
+    true_range = pd.concat([
+        high - low, (high - previous_close).abs(), (low - previous_close).abs()
+    ], axis=1).max(axis=1)
+    df["atr"] = true_range.ewm(alpha=1 / ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean()
+    avg_volume = volume.rolling(VOL_LOOKBACK, min_periods=VOL_LOOKBACK).mean()
+    df["rel_vol"] = volume / avg_volume.replace(0, np.nan)
+
+    # Exakte Typical-Price VWAP-Berechnung aus v4
+    typical_price = (high + low + close) / 3.0
+    session_key = pd.Series(pd.DatetimeIndex(df.index).tz_convert(NY_TZ).date, index=df.index)
+    pv = typical_price * volume
+    df["vwap"] = pv.groupby(session_key).cumsum() / volume.groupby(session_key).cumsum().replace(0, np.nan)
+    return df
+
+
+def daily_context(daily: pd.DataFrame) -> pd.DataFrame:
+    if daily.empty:
+        return pd.DataFrame(columns=["day", "trend_ok", "regime_ok"])
+    d = daily.sort_index().copy()
+    idx = pd.DatetimeIndex(d.index)
+    if idx.tz is None:
+        idx = idx.tz_localize("UTC")
+    days = idx.tz_convert(NY_TZ).tz_localize(None).normalize()
+    close = d["close"]
+    ema_fast = close.ewm(span=D_EMA_FAST, adjust=False, min_periods=D_EMA_FAST).mean()
+    ema_slow = close.ewm(span=D_EMA_SLOW, adjust=False, min_periods=D_EMA_SLOW).mean()
+    sma = close.rolling(D_SMA_TREND, min_periods=D_SMA_TREND).mean()
+    regime_ema = close.ewm(span=REGIME_EMA, adjust=False, min_periods=REGIME_EMA).mean()
+    result = pd.DataFrame({
+        "day": days.values.astype("datetime64[ns]"),
+        "trend_ok": ((close > sma) & (ema_fast > ema_slow)).to_numpy(),
+        "regime_ok": (close > regime_ema).to_numpy(),
+    })
+    return result.drop_duplicates("day", keep="last").sort_values("day").reset_index(drop=True)
+
+
+def attach_context(index: pd.Index, context: pd.DataFrame | None, column: str) -> np.ndarray:
+    if context is None or context.empty:
+        return np.zeros(len(index), dtype=bool)
+    idx = pd.DatetimeIndex(index)
+    if idx.tz is None:
+        idx = idx.tz_localize("UTC")
+    days = idx.tz_convert(NY_TZ).tz_localize(None).normalize()
+    left = pd.DataFrame({"day": days.values.astype("datetime64[ns]")})
+    right = context[["day", column]].copy()
+    right["day"] = pd.to_datetime(right["day"]).astype("datetime64[ns]")
+    merged = pd.merge_asof(
+        left.sort_values("day"), right.sort_values("day"),
+        on="day", direction="backward", allow_exact_matches=False
+    )
+    return merged[column].eq(True).to_numpy()
+
+
+def build_signals(
+    intraday: pd.DataFrame,
+    symbol_context: pd.DataFrame | None,
+    regime_context: pd.DataFrame | None,
+) -> pd.DataFrame:
+    df = add_indicators(intraday)
+    df["trend_ok"] = attach_context(df.index, symbol_context, "trend_ok")
+    df["regime_ok"] = attach_context(df.index, regime_context, "regime_ok")
+
+    idx = pd.DatetimeIndex(df.index).tz_convert(NY_TZ)
+    bar_end_minutes = idx.hour * 60 + idx.minute + BAR_MINUTES
+    time_ok = (
+        (bar_end_minutes >= SESSION_OPEN_MIN + ENTRY_AFTER_OPEN_MIN)
+        & (bar_end_minutes <= SESSION_CLOSE_MIN - ENTRY_BEFORE_CLOSE_MIN)
+    )
+
+    rsi_previous = df["rsi"].shift(1)
+    setup = (
+        (rsi_previous < RSI_ENTRY_MAX)
+        & (df["rsi"] > rsi_previous)
+        & (df["rsi"] < RSI_ENTRY_CEIL)
+    )
+    trend_ok = df["ema_fast"] > df["ema_slow"]
+    bullish_bar = df["close"] > df["open"]
+    volume_ok = df["rel_vol"] >= MIN_REL_VOLUME
+    atr_pct = df["atr"] / df["close"]
+    volatility_ok = (atr_pct >= MIN_ATR_PCT) & (atr_pct <= MAX_ATR_PCT)
+    vwap_ok = df["close"] > df["vwap"]
+
+    df["signal"] = (
+        setup & trend_ok & bullish_bar & volume_ok & volatility_ok & vwap_ok
+        & df["trend_ok"] & df["regime_ok"] & time_ok
+    ).fillna(False)
+
+    depth = ((RSI_ENTRY_MAX - rsi_previous) / RSI_ENTRY_MAX).clip(0, 1)
+    trend_strength = ((df["ema_fast"] - df["ema_slow"]) / df["atr"].replace(0, np.nan)).clip(0, 2) / 2
+    volume_strength = (df["rel_vol"] / 2).clip(0, 1)
+    df["score"] = (50 * depth + 30 * trend_strength + 20 * volume_strength).fillna(0.0)
+    return df
 
 
 # ============================================================
-# 6. BROKER & ORDERS
+# 5. POSITION SIZING ("FETTER FISCH" HIGH-RISK SIZING)
 # ============================================================
 
-def get_positions() -> dict:
-    return {p.symbol: p for p in trading_client.get_all_positions()}
+def position_size(
+    equity: float,
+    cash: float,
+    price: float,
+    atr: float,
+    current_exposure: float,
+    risk_factor: float,
+    score: float,
+) -> int:
+    """
+    Score-basierte Positionsgrößenberechnung ($20, $35 oder $50 Risiko pro Trade).
+    """
+    values = [equity, cash, price, atr, risk_factor]
+    if not all(math.isfinite(v) for v in values) or min(equity, cash, price, atr) <= 0:
+        return 0
 
-def get_open_orders() -> list:
-    req = GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=500)
-    flat, seen = [], set()
-    for order in trading_client.get_orders(filter=req):
-        for o in [order] + list(getattr(order, "legs", None) or []):
-            if str(o.id) not in seen:
-                seen.add(str(o.id))
-                flat.append(o)
-    return flat
+    stop_distance = ATR_STOP_MULTIPLIER * atr
+    if not math.isfinite(stop_distance) or stop_distance <= 0:
+        return 0
 
-def find_stop_order(open_orders: list, symbol: str):
-    for o in open_orders:
-        if o.symbol == symbol and _val(o.side) == "sell" and _val(o.order_type) in ("stop", "stop_limit", "trailing_stop"):
-            return o
+    # Risikostufen nach Score ("Fetter Fisch")
+    if score >= 70:
+        target_risk = 50.0   # Fetter Fisch: $50 max. Risiko
+    elif score >= 55:
+        target_risk = 35.0   # Solides Signal: $35 max. Risiko
+    else:
+        target_risk = 20.0   # Standard-Signal: $20 max. Risiko
+
+    effective_risk = target_risk * risk_factor
+    qty_by_risk = int(effective_risk / stop_distance)
+
+    exposure_budget = max(0.0, equity * MAX_TOTAL_EXPOSURE - current_exposure)
+    position_cap = equity * MAX_POSITION_FRACTION
+    spend_budget = min(cash, exposure_budget, position_cap)
+    qty_by_cash = int(spend_budget / price)
+
+    qty = min(qty_by_risk, qty_by_cash)
+    if qty < 1 or qty * price < MIN_ORDER_VALUE:
+        return 0
+    return qty
+
+
+# ============================================================
+# 6. BROKER-FUNKTIONEN & ORDER MANAGEMENT
+# ============================================================
+
+def require_clients() -> tuple[TradingClient, StockHistoricalDataClient]:
+    if trading_client is None or data_client is None:
+        raise RuntimeError("Clients sind nicht initialisiert.")
+    return trading_client, data_client
+
+
+def get_positions() -> dict[str, Any]:
+    tc, _ = require_clients()
+    return {p.symbol: p for p in tc.get_all_positions()}
+
+
+def get_open_orders() -> list[Any]:
+    tc, _ = require_clients()
+    request = GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=500, nested=True)
+    result = []
+    seen: set[str] = set()
+    for order in tc.get_orders(filter=request):
+        for item in [order] + list(getattr(order, "legs", None) or []):
+            order_id = str(getattr(item, "id", ""))
+            if order_id and order_id not in seen:
+                seen.add(order_id)
+                result.append(item)
+    return result
+
+
+def find_stop_order(open_orders: list[Any], symbol: str) -> Any | None:
+    for order in open_orders:
+        if getattr(order, "symbol", None) == symbol and enum_value(getattr(order, "side", "")) == "sell":
+            if enum_value(getattr(order, "order_type", getattr(order, "type", ""))) in ("stop", "stop_limit", "trailing_stop"):
+                return order
     return None
 
+
 def submit_entry(symbol: str, qty: int, price: float, atr: float, bar_time: pd.Timestamp, score: float) -> bool:
+    tc, _ = require_clients()
     stop = round(price - ATR_STOP_MULTIPLIER * atr, 2)
     target = round(price + ATR_TARGET_MULTIPLIER * atr, 2)
-    
-    kauf_zeit = ny_now().strftime("%d.%m.%Y um %H:%M Uhr")
+    if qty <= 0 or stop <= 0 or stop >= price or target <= price:
+        return False
+
+    client_id = f"smartv45-{symbol}-{int(bar_time.timestamp())}"[:48]
+    request = MarketOrderRequest(
+        symbol=symbol,
+        qty=qty,
+        side=OrderSide.BUY,
+        time_in_force=TimeInForce.GTC,
+        order_class=OrderClass.BRACKET,
+        take_profit=TakeProfitRequest(limit_price=target),
+        stop_loss=StopLossRequest(stop_price=stop),
+        client_order_id=client_id,
+    )
+    try:
+        submitted = tc.submit_order(order_data=request)
+    except Exception:
+        logger.exception("%s: Order-Übermittlung fehlgeschlagen.", symbol)
+        return False
+
     fisch_label = "🔥 **HIGH-RISK FETTER FISCH!**" if score >= 70 else ("🎯 Solides Signal" if score >= 55 else "⚡ Standard-Signal")
-    
-    msg = (
+    kauf_zeit = ny_now().strftime("%d.%m.%Y um %H:%M Uhr")
+
+    state.trades[symbol] = {
+        "order_id": str(submitted.id),
+        "client_order_id": client_id,
+        "status": "pending",
+        "qty": qty,
+        "entry_estimate": price,
+        "entry": price,
+        "stop": stop,
+        "initial_stop": stop,
+        "target": target,
+        "atr": atr,
+        "risk_per_share": price - stop,
+        "submitted_at": utc_now().isoformat(),
+        "signal_bar": bar_time.isoformat(),
+        "score": float(score),
+    }
+    state.save()
+
+    notify(
         f"🟢 **GEKAUFT: {symbol}** ({fisch_label})\n"
         f"🕒 **Zeitpunkt:** {kauf_zeit}\n"
         f"• **Score:** {score:.0f}/100\n"
@@ -506,92 +594,78 @@ def submit_entry(symbol: str, qty: int, price: float, atr: float, bar_time: pd.T
         f"• **Stop-Loss:** ${stop:.2f}\n"
         f"• **Max-Risiko:** ${abs(price - stop) * qty:.2f}"
     )
-    
-    order = MarketOrderRequest(
-        symbol=symbol,
-        qty=qty,
-        side=OrderSide.BUY,
-        time_in_force=TimeInForce.GTC,
-        order_class=OrderClass.BRACKET,
-        take_profit=TakeProfitRequest(limit_price=target),
-        stop_loss=StopLossRequest(stop_price=stop),
-        client_order_id=f"smartbot-{symbol}-{int(bar_time.timestamp())}",
-    )
-    try:
-        submitted = trading_client.submit_order(order_data=order)
-    except Exception:
-        return False
-
-    state.trades[symbol] = {
-        "order_id": str(submitted.id),
-        "status": "pending",
-        "qty": qty,
-        "entry": price,
-        "signal_price": price,
-        "stop": stop,
-        "initial_stop": stop,
-        "target": target,
-        "atr": atr,
-        "risk": price - stop,
-        "submitted_at": datetime.now(timezone.utc).isoformat(),
-    }
-    state.save()
-    notify(msg)
     return True
 
-def flatten(symbol: str, reason: str, open_orders: list, last_price: float | None = None) -> None:
+
+def cancel_symbol_orders(symbol: str, open_orders: list[Any]) -> None:
+    tc, _ = require_clients()
+    for order in open_orders:
+        if getattr(order, "symbol", None) == symbol:
+            try:
+                tc.cancel_order_by_id(order.id)
+            except Exception:
+                pass
+
+
+def flatten(symbol: str, reason: str, open_orders: list[Any], last_price: float | None = None) -> None:
+    tc, _ = require_clients()
     try:
-        for o in open_orders:
-            if o.symbol == symbol:
-                try:
-                    trading_client.cancel_order_by_id(o.id)
-                except Exception:
-                    pass
+        cancel_symbol_orders(symbol, open_orders)
         time.sleep(1.0)
-        trading_client.close_position(symbol)
-        if symbol in state.trades and last_price:
-            state.trades[symbol]["exit_hint"] = last_price
+        tc.close_position(symbol)
+        trade = state.trades.get(symbol)
+        if trade:
+            trade["exit_reason"] = reason
+            trade["exit_requested_at"] = utc_now().isoformat()
             state.save()
-        notify(f"🔴 **VERKAUFT {symbol}**\n• Grund: {reason}")
+        notify(f"🔴 **VERKAUFT: {symbol}**\n• **Grund:** {reason}")
     except Exception:
         logger.exception("%s: Schließen fehlgeschlagen.", symbol)
 
-def modify_stop(symbol: str, new_stop: float, open_orders: list) -> bool:
+
+def modify_stop(symbol: str, new_stop: float, open_orders: list[Any]) -> bool:
+    tc, _ = require_clients()
     order = find_stop_order(open_orders, symbol)
     if order is None:
         return False
     try:
-        trading_client.replace_order_by_id(order.id, ReplaceOrderRequest(stop_price=new_stop))
+        tc.replace_order_by_id(order.id, ReplaceOrderRequest(stop_price=round(new_stop, 2)))
         return True
     except Exception:
         return False
 
 
 # ============================================================
-# 7. TRADE-VERWALTUNG & RUNNER
+# 7. RECONCILIATION & POSITIONS-VERWALTUNG
 # ============================================================
 
-def reconcile_trades(positions: dict, open_orders: list) -> None:
-    open_symbols = {o.symbol for o in open_orders}
-    now = datetime.now(timezone.utc)
+def reconcile_trades(positions: dict[str, Any], open_orders: list[Any]) -> None:
+    tc, _ = require_clients()
+    symbols_with_orders = {getattr(o, "symbol", None) for o in open_orders}
+    now = utc_now()
 
     for symbol, trade in list(state.trades.items()):
-        if symbol in positions or symbol in open_symbols:
+        if symbol in positions or symbol in symbols_with_orders:
             continue
-        age = (now - datetime.fromisoformat(trade["submitted_at"])).total_seconds()
-        if age < 120:
+        try:
+            submitted_at = datetime.fromisoformat(trade["submitted_at"])
+            if submitted_at.tzinfo is None:
+                submitted_at = submitted_at.replace(tzinfo=timezone.utc)
+        except Exception:
+            submitted_at = now
+        if (now - submitted_at).total_seconds() < 120:
             continue
 
-        entry = trade.get("entry")
-        exit_price = trade.get("exit_hint")
+        entry = float(trade.get("entry", trade.get("entry_estimate", 0)) or 0)
+        exit_price = None
         filled = False
         try:
-            parent = trading_client.get_order_by_id(trade["order_id"])
-            filled = _val(parent.status) == "filled"
-            if filled and parent.filled_avg_price:
+            parent = tc.get_order_by_id(trade["order_id"])
+            filled = enum_value(parent.status) == "filled"
+            if getattr(parent, "filled_avg_price", None):
                 entry = float(parent.filled_avg_price)
             for leg in getattr(parent, "legs", None) or []:
-                if _val(leg.status) == "filled" and leg.filled_avg_price:
+                if enum_value(leg.status) == "filled" and getattr(leg, "filled_avg_price", None):
                     exit_price = float(leg.filled_avg_price)
         except Exception:
             continue
@@ -601,299 +675,426 @@ def reconcile_trades(positions: dict, open_orders: list) -> None:
             state.save()
             continue
 
+        state.data["cooldown"][symbol] = now.isoformat()
+        risk = float(trade.get("risk_per_share", 0) or 0)
+        qty = int(trade.get("qty", 0) or 0)
         verkauf_zeit = ny_now().strftime("%d.%m.%Y um %H:%M Uhr")
-        state.data["cooldown"][symbol] = datetime.now(timezone.utc).isoformat()
 
-        if exit_price and entry and trade["risk"] > 0:
-            r = (exit_price - entry) / trade["risk"]
-            pnl = (exit_price - entry) * trade["qty"]
-            state.record_result(r)
+        if exit_price and entry > 0 and risk > 0 and qty > 0:
+            r_multiple = (exit_price - entry) / risk
+            pnl = (exit_price - entry) * qty
+            state.record_result(r_multiple)
 
             if pnl >= 0:
                 header = f"🟢 **VERKAUFT MIT GEWINN: {symbol}**"
-                pnl_str = f"🟩 **Gewinn:** +${pnl:.2f} (+{r:.2f}R)"
+                pnl_str = f"🟩 **Gewinn:** +${pnl:.2f} (+{r_multiple:.2f}R)"
             else:
                 header = f"🔴 **VERKAUFT MIT VERLUST: {symbol}**"
-                pnl_str = f"🟥 **Verlust:** -${abs(pnl):.2f} ({r:.2f}R)"
+                pnl_str = f"🟥 **Verlust:** -${abs(pnl):.2f} ({r_multiple:.2f}R)"
 
-            notify(f"{header}\n🕒 **Zeitpunkt:** {verkauf_zeit}\n• **Kauf:** ${entry:.2f}\n• **Verkauf:** ${exit_price:.2f}\n• {pnl_str}")
+            notify(
+                f"{header}\n"
+                f"🕒 **Zeitpunkt:** {verkauf_zeit}\n"
+                f"• **Kauf:** ${entry:.2f}\n"
+                f"• **Verkauf:** ${exit_price:.2f}\n"
+                f"• {pnl_str}"
+            )
         state.save()
 
-def manage_positions(positions: dict, open_orders: list) -> None:
-    now = datetime.now(timezone.utc)
-    for symbol, pos in positions.items():
+
+def manage_positions(positions: dict[str, Any], open_orders: list[Any]) -> None:
+    now = utc_now()
+    for symbol, position in positions.items():
         trade = state.trades.get(symbol)
         if not trade:
             continue
         try:
-            price = float(pos.current_price)
-            if trade["status"] == "pending":
-                fill = float(pos.avg_entry_price)
-                trade.update(status="open", entry=fill, risk=max(fill - trade["stop"], 0.01))
+            price = float(position.current_price)
+            entry = float(position.avg_entry_price)
+            if price <= 0 or entry <= 0:
+                continue
+            if trade.get("status") == "pending":
+                trade["status"] = "open"
+                trade["entry"] = entry
+                trade["risk_per_share"] = max(entry - float(trade["initial_stop"]), 0.01)
                 state.save()
 
-            entry, risk, stop = trade["entry"], trade["risk"], trade["stop"]
-            r_mult = (price - entry) / risk
-            
-            if price <= stop * 0.998:
-                flatten(symbol, f"Sicherheitsnetz-Stop ({r_mult:+.2f}R)", open_orders, price)
-                continue
-            
-            age_days = (now - datetime.fromisoformat(trade["submitted_at"])).total_seconds() / 86400
+            risk = max(float(trade.get("risk_per_share", 0.01)), 0.01)
+            stop = float(trade["stop"])
+            r_multiple = (price - entry) / risk
+
+            submitted_at = datetime.fromisoformat(trade["submitted_at"])
+            if submitted_at.tzinfo is None:
+                submitted_at = submitted_at.replace(tzinfo=timezone.utc)
+            age_days = (now - submitted_at).total_seconds() / 86400
+
             if age_days > MAX_HOLD_DAYS:
-                flatten(symbol, f"Zeit-Exit nach {age_days:.1f} Tagen ({r_mult:+.2f}R)", open_orders, price)
+                flatten(symbol, f"Zeit-Exit nach {age_days:.1f} Tagen ({r_multiple:+.2f}R)", open_orders, price)
                 continue
 
             desired = stop
-            if r_mult >= BREAKEVEN_R:
+            if r_multiple >= BREAKEVEN_R:
                 desired = max(desired, entry + 0.1 * risk)
-            
-            if r_mult >= TRAIL_START_R:
-                desired = max(desired, price - 0.8 * trade["atr"])
-            
-            desired = round(min(desired, price - 0.05), 2)
+            if r_multiple >= TRAIL_START_R:
+                desired = max(desired, price - TRAIL_ATR_MULTIPLIER * float(trade["atr"]))
 
-            if desired >= stop + 0.01 and modify_stop(symbol, desired, open_orders):
-                trade["stop"] = desired
-                state.save()
-                notify(f"🔼 **{symbol}**: Stop auf ${desired:.2f} nachgezogen ({r_mult:+.2f}R). Runner läuft!")
+            desired = round(min(desired, price - 0.02), 2)
+            if desired >= stop + 0.01:
+                if modify_stop(symbol, desired, open_orders):
+                    trade["stop"] = desired
+                    state.save()
+                    notify(f"🔼 **{symbol}**: Stop auf ${desired:.2f} nachgezogen ({r_multiple:+.2f}R). Runner läuft!")
         except Exception:
             logger.exception("%s: Fehler bei Positionsverwaltung.", symbol)
 
 
 # ============================================================
-# 8. EINSTIEGSSUCHE
+# 8. EINSTIEGSSUCHE & TAGESKONTEXT
 # ============================================================
 
-def scan_for_entries(clock, account, positions: dict, open_orders: list) -> None:
+_daily_cache: dict[str, Any] = {"date": None, "contexts": {}}
+
+def get_daily_contexts() -> dict[str, pd.DataFrame]:
+    today = ny_now().date().isoformat()
+    if _daily_cache["date"] == today and _daily_cache["contexts"]:
+        return _daily_cache["contexts"]
+    start = utc_now() - timedelta(days=DAILY_LOOKBACK_DAYS)
+    bars = fetch_bars(list(TICKERS) + [REGIME_SYMBOL], TimeFrame.Day, start)
+    contexts = {symbol: daily_context(frame) for symbol, frame in bars.items()}
+    _daily_cache.update(date=today, contexts=contexts)
+    return contexts
+
+
+def scan_for_entries(account: Any, positions: dict[str, Any], open_orders: list[Any]) -> None:
     equity = float(account.equity)
     cash = float(account.cash)
-    occupied = set(positions) | {o.symbol for o in open_orders}
+    occupied = set(positions) | {getattr(o, "symbol", None) for o in open_orders}
+    occupied.discard(None)
     slots = MAX_OPEN_POSITIONS - len(occupied)
     if slots <= 0:
         return
 
-    ctx = get_daily_contexts()
-    if REGIME_SYMBOL not in ctx:
+    contexts = get_daily_contexts()
+    regime_context = contexts.get(REGIME_SYMBOL)
+    if regime_context is None or regime_context.empty:
         return
-    regime_ctx = ctx[REGIME_SYMBOL]
-    now = datetime.now(timezone.utc)
-    candidates_symbols = [s for s in TICKERS if s not in occupied]
+
+    now = utc_now()
+    candidates_symbols = [symbol for symbol in TICKERS if symbol not in occupied]
     bars = fetch_bars(candidates_symbols, TF_INTRADAY, now - timedelta(days=INTRADAY_LOOKBACK_DAYS))
-    candidates = []
+    candidates: list[tuple[float, str, float, float, pd.Timestamp]] = []
 
     for symbol in candidates_symbols:
         try:
-            cd = state.data["cooldown"].get(symbol)
-            if cd and now - datetime.fromisoformat(cd) < timedelta(minutes=COOLDOWN_MINUTES):
+            cooldown = state.data["cooldown"].get(symbol)
+            if cooldown:
+                cooldown_dt = datetime.fromisoformat(cooldown)
+                if cooldown_dt.tzinfo is None:
+                    cooldown_dt = cooldown_dt.replace(tzinfo=timezone.utc)
+                if now - cooldown_dt < timedelta(minutes=COOLDOWN_MINUTES):
+                    continue
+
+            frame = bars.get(symbol)
+            if frame is None:
                 continue
-            df = bars.get(symbol)
-            if df is None:
+            frame = regular_hours(frame)
+            frame = frame[frame.index + timedelta(minutes=BAR_MINUTES) <= now]
+            if len(frame) < MIN_BARS:
                 continue
-            df = regular_hours(df)
-            df = df[df.index + timedelta(minutes=BAR_MINUTES) <= now]
-            if len(df) < MIN_BARS:
-                continue
-            lag = now - (df.index[-1] + timedelta(minutes=BAR_MINUTES)).to_pydatetime()
-            if lag > timedelta(minutes=MAX_BAR_LAG_MINUTES):
+            last_bar_end = (frame.index[-1] + timedelta(minutes=BAR_MINUTES)).to_pydatetime()
+            if last_bar_end.tzinfo is None:
+                last_bar_end = last_bar_end.replace(tzinfo=timezone.utc)
+            if now - last_bar_end > timedelta(minutes=MAX_BAR_LAG_MINUTES):
                 continue
 
-            sig = build_signals(df, ctx.get(symbol), regime_ctx)
-            bar_time = sig.index[-1]
-            if state.data["last_bar"].get(symbol) == bar_time.isoformat():
+            signals = build_signals(frame, contexts.get(symbol), regime_context)
+            bar_time = signals.index[-1]
+            bar_key = bar_time.isoformat()
+            if state.data["last_bar"].get(symbol) == bar_key:
                 continue
-            state.data["last_bar"][symbol] = bar_time.isoformat()
+            state.data["last_bar"][symbol] = bar_key
             state.save()
 
-            last = sig.iloc[-1]
+            last = signals.iloc[-1]
             logger.info(
                 "%s | Kurs %.2f | VWAP %.2f | RSI %.1f | Score %.0f | Signal=%s",
                 symbol, last["close"], last["vwap"], last["rsi"], last["score"], bool(last["signal"])
             )
             if bool(last["signal"]):
-                candidates.append((float(last["score"]), symbol, float(last["close"]), float(last["atr"]), bar_time))
+                candidates.append((
+                    float(last["score"]), symbol, float(last["close"]),
+                    float(last["atr"]), bar_time
+                ))
         except Exception:
             pass
 
     exposure = sum(abs(float(p.market_value)) for p in positions.values())
+
     for score, symbol, price, atr, bar_time in sorted(candidates, reverse=True):
         if slots <= 0:
             break
-        qty = position_size(equity, cash, price, atr, exposure, state.risk_factor(), score)
+        qty = position_size(
+            equity=equity, cash=cash, price=price, atr=atr,
+            current_exposure=exposure, risk_factor=state.risk_factor(), score=score
+        )
         if qty < 1:
             continue
         if submit_entry(symbol, qty, price, atr, bar_time, score):
             slots -= 1
-            exposure += qty * price
-            cash -= qty * price
+            cost = qty * price
+            exposure += cost
+            cash -= cost
 
 
 # ============================================================
 # 9. HAUPTSCHLEIFE
 # ============================================================
 
-def maybe_daily_summary(account, daily_ret: float, drawdown: float) -> None:
+def maybe_daily_summary(account: Any, daily_return: float, drawdown: float) -> None:
     now = ny_now()
     today = now.date().isoformat()
     if now.weekday() < 5 and now.hour >= 16 and state.data["summary_date"] != today:
-        s = state.stats
+        stats = state.stats
         notify(
             f"📊 **Tagesbericht**\n"
             f"• Kontostand: ${float(account.equity):,.2f}\n"
-            f"• Tagesrendite: {daily_ret:+.2%}\n"
+            f"• Tagesrendite: {daily_return:+.2%}\n"
             f"• Max. Rücksetzer: {drawdown:.2%}\n"
-            f"• Trades Gesamt: {s['wins']}W / {s['losses']}L\n"
-            f"• Performance: {s['total_r']:+.1f}R"
+            f"• Trades Gesamt: {stats['wins']}W / {stats['losses']}L\n"
+            f"• Performance: {stats['total_r']:+.1f}R"
         )
         state.data["summary_date"] = today
         state.save()
 
+
 def run_cycle() -> int:
-    clock = trading_client.get_clock()
-    account = trading_client.get_account()
+    tc, _ = require_clients()
+    clock = tc.get_clock()
+    account = tc.get_account()
     equity = float(account.equity)
-    
     last_equity = float(account.last_equity) if getattr(account, "last_equity", None) else None
-    daily_ret, drawdown = state.update_risk(equity, last_equity)
+    daily_return, drawdown = state.update_risk(equity, last_equity)
 
     positions = get_positions()
-    open_orders = get_open_orders()
-    reconcile_trades(positions, open_orders)
+    orders = get_open_orders()
+    reconcile_trades(positions, orders)
     positions = get_positions()
-    manage_positions(positions, open_orders)
+    orders = get_open_orders()
+    manage_positions(positions, orders)
 
     if not clock.is_open:
-        maybe_daily_summary(account, daily_ret, drawdown)
+        maybe_daily_summary(account, daily_return, drawdown)
         return POLL_SECONDS_CLOSED
 
     minutes_to_close = (clock.next_close - clock.timestamp).total_seconds() / 60
     if state.data["kill_switch"] or state.data["day"].get("halted") or minutes_to_close < ENTRY_BEFORE_CLOSE_MIN:
         return POLL_SECONDS
 
-    scan_for_entries(clock, account, get_positions(), get_open_orders())
+    scan_for_entries(account, get_positions(), get_open_orders())
     return POLL_SECONDS
+
 
 def live_main() -> None:
     init_clients()
-    notify(f"🚀 **Bot gestartet** (v3.4 High-Risk Sizing)\nBeobachte: {', '.join(TICKERS)}")
-
-    errors = 0
-    try:
-        while True:
-            sleep_for = POLL_SECONDS
-            try:
-                sleep_for = run_cycle()
-                errors = 0
-            except Exception:
-                errors += 1
-                if errors in (3, 10, 30):
-                    notify(f"⚠️ **Achtung**: {errors} Fehler in Folge.")
-                sleep_for = min(POLL_SECONDS * 2 ** min(errors, 4), 600)
-            time.sleep(sleep_for)
-    except KeyboardInterrupt:
-        notify("⏹️ **Bot manuell gestoppt**.")
+    notify(f"🚀 **Bot gestartet** (v4.5 Hybrid High-Risk)\nBeobachte: {', '.join(TICKERS)}")
+    consecutive_errors = 0
+    while True:
+        sleep_for = POLL_SECONDS
+        try:
+            sleep_for = run_cycle()
+            consecutive_errors = 0
+        except KeyboardInterrupt:
+            notify("⏹️ **Bot manuell gestoppt**.")
+            return
+        except Exception:
+            consecutive_errors += 1
+            logger.exception("Fehler in Hauptschleife.")
+            if consecutive_errors in (3, 10, 20):
+                notify(f"⚠️ **Achtung**: {consecutive_errors} Fehler in Folge.")
+            sleep_for = min(POLL_SECONDS * (2 ** min(consecutive_errors, 4)), 600)
+        time.sleep(sleep_for)
 
 
 # ============================================================
 # 10. BACKTEST
 # ============================================================
 
-def simulate(frames: dict[str, pd.DataFrame], capital: float = STARTING_CAPITAL, slippage_bps: float = SLIPPAGE_BPS) -> dict:
+def simulate(
+    frames: dict[str, pd.DataFrame],
+    capital: float = STARTING_CAPITAL,
+    slippage_bps: float = SLIPPAGE_BPS,
+) -> dict[str, Any]:
+    if not frames:
+        return {"equity": pd.Series(dtype=float), "trades": pd.DataFrame(), "n_trades": 0}
+
     slip = slippage_bps / 10_000
-    rows = {sym: {ts: (o, h, l, c, a, bool(s), sc) for ts, o, h, l, c, a, s, sc in zip(f.index, f["open"], f["high"], f["low"], f["close"], f["atr"], f["signal"], f["score"])} for sym, f in frames.items()}
-    all_ts = sorted(set().union(*[set(f.index) for f in frames.values()]))
-    bar = timedelta(minutes=BAR_MINUTES)
-    cash, positions, last_close, last_exit, pending, trades, curve = capital, {}, {}, {}, [], [], []
-    consec_losses, cur_day, day_start_equity, halted, prev_equity = 0, None, capital, False, capital
+    rows: dict[str, dict[pd.Timestamp, tuple]] = {}
+    for symbol, frame in frames.items():
+        rows[symbol] = {}
+        for ts, row in frame.iterrows():
+            rows[symbol][ts] = (
+                float(row["open"]), float(row["high"]), float(row["low"]),
+                float(row["close"]), float(row["atr"]), bool(row["signal"]),
+                float(row["score"])
+            )
 
-    for ts in all_ts:
-        for sym in frames:
-            if row := rows[sym].get(ts): last_close[sym] = row[3]
-        day = ts.tz_convert(NY_TZ).date()
-        if day != cur_day: cur_day, day_start_equity, halted = day, prev_equity, False
+    timestamps = sorted(set().union(*(set(frame.index) for frame in frames.values())))
+    cash = float(capital)
+    positions: dict[str, dict[str, Any]] = {}
+    last_close: dict[str, float] = {}
+    last_exit: dict[str, pd.Timestamp] = {}
+    pending: list[tuple] = []
+    trades: list[dict[str, Any]] = []
+    curve: list[tuple[pd.Timestamp, float]] = []
+    consecutive_losses = 0
+    current_day = None
+    day_start_equity = capital
+    halted = False
 
-        for sig_ts, score, sym, sig_close, atr in sorted(pending, key=lambda x: -x[1]):
-            if not (row := rows[sym].get(ts)) or sym in positions or len(positions) >= MAX_OPEN_POSITIONS or halted: continue
-            if ts - sig_ts > 2 * bar or (sym in last_exit and ts - last_exit[sym] < timedelta(minutes=COOLDOWN_MINUTES)): continue
-            entry, stop, target = row[0] * (1 + slip), sig_close - ATR_STOP_MULTIPLIER * atr, sig_close + ATR_TARGET_MULTIPLIER * atr
-            if entry <= stop + 0.01 or entry >= target: continue
-            exposure = sum(p["qty"] * last_close[s] for s, p in positions.items())
-            rf = LOSS_STREAK_RISK_FACTOR if consec_losses >= LOSS_STREAK_THROTTLE else 1.0
-            if (qty := position_size(cash + exposure, cash, entry, atr, exposure, rf, score)) < 1: continue
+    for ts in timestamps:
+        for symbol in frames:
+            row = rows[symbol].get(ts)
+            if row:
+                last_close[symbol] = row[3]
+
+        day = ts.tz_convert(NY_TZ).date() if ts.tzinfo else ts.date()
+        if day != current_day:
+            current_day = day
+            day_start_equity = curve[-1][1] if curve else capital
+            halted = False
+
+        # Next-Bar Open Ausführung für realistischen Backtest
+        for signal_ts, score, symbol, signal_close, signal_atr in sorted(pending, key=lambda item: -item[1]):
+            row = rows[symbol].get(ts)
+            if row is None or symbol in positions or len(positions) >= MAX_OPEN_POSITIONS or halted:
+                continue
+            if ts <= signal_ts or ts - signal_ts > timedelta(minutes=2 * BAR_MINUTES):
+                continue
+            if symbol in last_exit and ts - last_exit[symbol] < timedelta(minutes=COOLDOWN_MINUTES):
+                continue
+
+            entry = row[0] * (1 + slip)
+            stop = signal_close - ATR_STOP_MULTIPLIER * signal_atr
+            target = signal_close + ATR_TARGET_MULTIPLIER * signal_atr
+            if entry <= stop + 0.01 or target <= entry:
+                continue
+
+            equity_now = cash + sum(p["qty"] * last_close.get(s, p["entry"]) for s, p in positions.items())
+            exposure = sum(p["qty"] * last_close.get(s, p["entry"]) for s, p in positions.items())
+            risk_factor = LOSS_STREAK_RISK_FACTOR if consecutive_losses >= LOSS_STREAK_THROTTLE else 1.0
+            qty = position_size(
+                equity_now, cash, entry, signal_atr, exposure, risk_factor, score
+            )
+            if qty < 1:
+                continue
             cash -= qty * entry
-            positions[sym] = dict(qty=qty, entry=entry, stop=stop, target=target, atr=atr, risk=entry - stop, entry_ts=ts)
+            positions[symbol] = {
+                "qty": qty, "entry": entry, "stop": stop, "target": target,
+                "atr": signal_atr, "risk": max(entry - stop, 0.01), "entry_ts": ts
+            }
         pending = []
 
-        for sym, p in list(positions.items()):
-            if not (row := rows[sym].get(ts)): continue
-            o, h, l, c = row[:4]
-            exit_price, limit_exit = None, False
-            if l <= p["stop"]: exit_price = min(o, p["stop"])
-            elif h >= p["target"]: exit_price, limit_exit = max(o, p["target"]), True
+        for symbol, position in list(positions.items()):
+            row = rows[symbol].get(ts)
+            if row is None:
+                continue
+            o, high, low, close = row[:4]
+            exit_price = None
+            if low <= position["stop"]:
+                exit_price = min(o, position["stop"]) * (1 - slip)
+            elif high >= position["target"]:
+                exit_price = max(o, position["target"])
             else:
-                r_mult = (c - p["entry"]) / p["risk"]
-                if r_mult >= BREAKEVEN_R: p["stop"] = max(p["stop"], p["entry"] + 0.1 * p["risk"])
-                if r_mult >= TRAIL_START_R: p["stop"] = max(p["stop"], c - 0.8 * p["atr"])
-                if ts - p["entry_ts"] > timedelta(days=MAX_HOLD_DAYS): exit_price = c
-            if exit_price is not None:
-                fill = exit_price if limit_exit else exit_price * (1 - slip)
-                cash += p["qty"] * fill
-                r = (fill - p["entry"]) / p["risk"]
-                trades.append(dict(symbol=sym, entry_ts=p["entry_ts"], exit_ts=ts, r=r, pnl=(fill - p["entry"]) * p["qty"]))
-                if r < -0.05: consec_losses += 1
-                elif r > 0.05: consec_losses = 0
-                last_exit[sym], _ = ts, positions.pop(sym)
+                r_mult = (close - position["entry"]) / position["risk"]
+                if r_mult >= BREAKEVEN_R:
+                    position["stop"] = max(position["stop"], position["entry"] + 0.1 * position["risk"])
+                if r_mult >= TRAIL_START_R:
+                    position["stop"] = max(position["stop"], close - TRAIL_ATR_MULTIPLIER * position["atr"])
+                if ts - position["entry_ts"] > timedelta(days=MAX_HOLD_DAYS):
+                    exit_price = close * (1 - slip)
 
-        equity = cash + sum(p["qty"] * last_close[s] for s, p in positions.items())
-        if equity / day_start_equity - 1 <= -MAX_DAILY_LOSS: halted = True
-        prev_equity = equity
+            if exit_price is not None:
+                qty = position["qty"]
+                cash += qty * exit_price
+                pnl = (exit_price - position["entry"]) * qty
+                r_multiple = (exit_price - position["entry"]) / position["risk"]
+                trades.append({
+                    "symbol": symbol, "entry_ts": position["entry_ts"], "exit_ts": ts,
+                    "r": r_multiple, "pnl": pnl
+                })
+                if r_multiple < -0.05:
+                    consecutive_losses += 1
+                elif r_multiple > 0.05:
+                    consecutive_losses = 0
+                last_exit[symbol] = ts
+                del positions[symbol]
+
+        equity = cash + sum(p["qty"] * last_close.get(s, p["entry"]) for s, p in positions.items())
+        if day_start_equity > 0 and equity / day_start_equity - 1 <= -MAX_DAILY_LOSS:
+            halted = True
         curve.append((ts, equity))
 
-        for sym in frames:
-            if (row := rows[sym].get(ts)) and row[5] and sym not in positions:
-                pending.append((ts, row[6], sym, row[3], row[4]))
+        for symbol in frames:
+            row = rows[symbol].get(ts)
+            if row and row[5] and symbol not in positions:
+                pending.append((ts, row[6], symbol, row[3], row[4]))
 
-    eq = pd.Series([v for _, v in curve], index=[t for t, _ in curve]) if curve else pd.Series(dtype=float)
-    tdf = pd.DataFrame(trades)
-    result = {"equity": eq, "trades": tdf, "open_positions": len(positions), "n_trades": len(tdf)}
-    if len(eq): result.update(total_return=eq.iloc[-1] / capital - 1, max_drawdown=(eq / eq.cummax() - 1).min())
-    if len(tdf):
-        wins, losses = tdf[tdf["pnl"] > 0], tdf[tdf["pnl"] <= 0]
-        result.update(win_rate=len(wins) / len(tdf), avg_r=tdf["r"].mean(), profit_factor=wins["pnl"].sum() / abs(losses["pnl"].sum()) if len(losses) and losses["pnl"].sum() != 0 else float("inf"))
+    equity_curve = pd.Series([value for _, value in curve], index=[ts for ts, _ in curve])
+    trade_frame = pd.DataFrame(trades)
+    result: dict[str, Any] = {
+        "equity": equity_curve, "trades": trade_frame,
+        "open_positions": len(positions), "n_trades": len(trade_frame)
+    }
+    if not equity_curve.empty:
+        result["total_return"] = equity_curve.iloc[-1] / capital - 1
+        result["max_drawdown"] = (equity_curve / equity_curve.cummax() - 1).min()
+    if not trade_frame.empty:
+        wins = trade_frame.loc[trade_frame["pnl"] > 0, "pnl"]
+        losses = trade_frame.loc[trade_frame["pnl"] <= 0, "pnl"]
+        result["win_rate"] = len(wins) / len(trade_frame)
+        result["avg_r"] = float(trade_frame["r"].mean())
     return result
+
 
 def run_backtest(days: int) -> None:
     init_clients()
-    now = datetime.now(timezone.utc)
-    intraday = fetch_bars(TICKERS, TF_INTRADAY, now - timedelta(days=days + 14))
-    daily = fetch_bars(TICKERS + [REGIME_SYMBOL], TimeFrame.Day, now - timedelta(days=days + DAILY_LOOKBACK_DAYS))
-    if REGIME_SYMBOL not in daily: sys.exit("Keine Tagesdaten.")
-    regime_ctx = daily_context(daily[REGIME_SYMBOL])
-
-    frames, bench = {}, []
+    now = utc_now()
+    intraday = fetch_bars(list(TICKERS), TF_INTRADAY, now - timedelta(days=days + 20))
+    daily = fetch_bars(list(TICKERS) + [REGIME_SYMBOL], TimeFrame.Day,
+                       now - timedelta(days=days + DAILY_LOOKBACK_DAYS))
+    if REGIME_SYMBOL not in daily:
+        raise SystemExit("Keine SPY Tagesdaten verfügbar.")
+    regime_context = daily_context(daily[REGIME_SYMBOL])
     cutoff = now - timedelta(days=days)
-    for sym in TICKERS:
-        if sym not in intraday or sym not in daily: continue
-        sig = build_signals(regular_hours(intraday[sym]), daily_context(daily[sym]), regime_ctx)
-        sig = sig[sig.index >= cutoff]
-        if sig.empty: continue
-        frames[sym] = sig
-        bench.append(sig["close"].iloc[-1] / sig["close"].iloc[0] - 1)
-    
-    if not frames: sys.exit("Keine Daten für Backtest.")
-    res = simulate(frames)
-    print("\n=========== BACKTEST ===========")
-    print(f"Trades: {res['n_trades']}")
-    if res["n_trades"]:
-        print(f"Trefferquote: {res['win_rate']:.1%} | Ø Ergebnis: {res['avg_r']:+.2f}R | Rendite: {res.get('total_return', 0):+.2%} | Max. Drawdown: {res.get('max_drawdown', 0):.2%}")
+    frames = {}
+    for symbol in TICKERS:
+        if symbol not in intraday or symbol not in daily:
+            continue
+        regular = regular_hours(intraday[symbol])
+        signals = build_signals(regular, daily_context(daily[symbol]), regime_context)
+        signals = signals.loc[signals.index >= cutoff]
+        if not signals.empty:
+            frames[symbol] = signals
+    if not frames:
+        raise SystemExit("Keine Daten für Backtest verfügbar.")
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
+    result = simulate(frames)
+    print("\n=========== BACKTEST v4.5 Hybrid ===========")
+    print(f"Trades: {result['n_trades']}")
+    if result["n_trades"]:
+        print(f"Trefferquote: {result.get('win_rate', 0):.1%} | Ø Ergebnis: {result.get('avg_r', 0):+.2f}R | Rendite: {result.get('total_return', 0):+.2%} | Max. Drawdown: {result.get('max_drawdown', 0):.2%}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Smart Trading Bot v4.5 Hybrid")
     parser.add_argument("--backtest", action="store_true")
     parser.add_argument("--days", type=int, default=120)
-    parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+    if args.backtest:
+        run_backtest(args.days)
+    else:
+        live_main()
 
-    DRY_RUN = args.dry_run
-    if args.backtest: run_backtest(args.days)
-    else: live_main()
+
+if __name__ == "__main__":
+    main()
