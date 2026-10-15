@@ -1,5 +1,5 @@
 """
-Smart Trading Bot v4.5 Hybrid (Optimiert: Take-Profit 3.2 ATR & Volumenschwelle 0.8)
+Smart Trading Bot v4.6 Power-Trend (Alpaca, 8 Ticker, VWAP, High-Risk Sizing & Custom Telegram Report)
 """
 
 from __future__ import annotations
@@ -67,7 +67,7 @@ DATA_FEED_NAME = os.getenv("BOT_DATA_FEED", "iex").lower()
 BAR_MINUTES = 15
 TF_INTRADAY = TimeFrame(BAR_MINUTES, TimeFrameUnit.Minute)
 
-# Indikatoren & Ausstieg (Optimierte Parameter)
+# Indikatoren & Ausstieg (Power-Trend Setup)
 RSI_PERIOD = 14
 RSI_ENTRY_MAX = 50
 RSI_ENTRY_CEIL = 58
@@ -92,14 +92,14 @@ NY_TZ = "America/New_York"
 NY = ZoneInfo(NY_TZ)
 
 ATR_STOP_MULTIPLIER = 2.0
-ATR_TARGET_MULTIPLIER = 3.2     # Schnellere Gewinnmitnahme in Seitwärtsphasen
+ATR_TARGET_MULTIPLIER = 6.0     # Power-Trend Target für maximale Gewinne
 BREAKEVEN_R = 1.0
-TRAIL_START_R = 1.8
-TRAIL_ATR_MULTIPLIER = 0.8
+TRAIL_START_R = 2.0
+TRAIL_ATR_MULTIPLIER = 1.0
 MAX_HOLD_DAYS = 5
 COOLDOWN_MINUTES = 30
 
-# High-Risk / High-Reward Setup
+# High-Risk / High-Reward Sizing Setup
 MAX_POSITION_FRACTION = 0.95
 MAX_TOTAL_EXPOSURE = 0.95
 MAX_OPEN_POSITIONS = 4
@@ -539,7 +539,7 @@ def submit_entry(symbol: str, qty: int, price: float, atr: float, bar_time: pd.T
     if qty <= 0 or stop <= 0 or stop >= price or target <= price:
         return False
 
-    client_id = f"smartv45-{symbol}-{int(bar_time.timestamp())}"[:48]
+    client_id = f"smartv46-{symbol}-{int(bar_time.timestamp())}"[:48]
     request = MarketOrderRequest(
         symbol=symbol,
         qty=qty,
@@ -839,21 +839,34 @@ def scan_for_entries(account: Any, positions: dict[str, Any], open_orders: list[
 
 
 # ============================================================
-# 9. HAUPTSCHLEIFE
+# 9. HAUPTSCHLEIFE & ANGEPASSTER TAGESBERICHT
 # ============================================================
 
 def maybe_daily_summary(account: Any, daily_return: float, drawdown: float) -> None:
     now = ny_now()
     today = now.date().isoformat()
     if now.weekday() < 5 and now.hour >= 16 and state.data["summary_date"] != today:
+        equity = float(account.equity)
+        base_equity = float(state.data["day"].get("base_equity") or equity)
+        pnl = equity - base_equity
+
+        if pnl >= 0:
+            profit_str = f"🟩 **Tagesprofit:** +${pnl:,.2f}"
+            loss_str = "libre"
+            loss_line = "🟥 **Tagesverlust:** $0.00"
+        else:
+            profit_str = "🟩 **Tagesprofit:** $0.00"
+            loss_line = f"🟥 **Tagesverlust:** -${abs(pnl):,.2f}"
+
         stats = state.stats
         notify(
             f"📊 **Tagesbericht**\n"
-            f"• Kontostand: ${float(account.equity):,.2f}\n"
-            f"• Tagesrendite: {daily_return:+.2%}\n"
-            f"• Max. Rücksetzer: {drawdown:.2%}\n"
-            f"• Trades Gesamt: {stats['wins']}W / {stats['losses']}L\n"
-            f"• Performance: {stats['total_r']:+.1f}R"
+            f"• **Kontostand:** ${equity:,.2f}\n"
+            f"• {profit_str}\n"
+            f"• {loss_line}\n"
+            f"• **Max. Rücksetzer:** {drawdown:.2%}\n"
+            f"• **Trades Gesamt:** {stats['wins']}W / {stats['losses']}L\n"
+            f"• **Performance:** {stats['total_r']:+.1f}R"
         )
         state.data["summary_date"] = today
         state.save()
@@ -888,7 +901,7 @@ def run_cycle() -> int:
 
 def live_main() -> None:
     init_clients()
-    notify(f"🚀 **Bot gestartet** (v4.5 Hybrid - Opt. TP 3.2 / Vol 0.8)\nBeobachte: {', '.join(TICKERS)}")
+    notify(f"🚀 **Bot gestartet** (v4.6 Power-Trend - Custom Report)\nBeobachte: {', '.join(TICKERS)}")
     consecutive_errors = 0
     while True:
         sleep_for = POLL_SECONDS
@@ -1070,14 +1083,14 @@ def run_backtest(days: int) -> None:
         raise SystemExit("Keine Daten für Backtest verfügbar.")
 
     result = simulate(frames)
-    print("\n=========== BACKTEST v4.5 Hybrid (Optimiert) ===========")
+    print("\n=========== BACKTEST v4.6 Power-Trend ===========")
     print(f"Trades: {result['n_trades']}")
     if result["n_trades"]:
         print(f"Trefferquote: {result.get('win_rate', 0):.1%} | Ø Ergebnis: {result.get('avg_r', 0):+.2f}R | Rendite: {result.get('total_return', 0):+.2%} | Max. Drawdown: {result.get('max_drawdown', 0):.2%}")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Smart Trading Bot v4.5 Hybrid")
+    parser = argparse.ArgumentParser(description="Smart Trading Bot v4.6 Power-Trend")
     parser.add_argument("--backtest", action="store_true")
     parser.add_argument("--days", type=int, default=120)
     args = parser.parse_args()
