@@ -1,6 +1,6 @@
 """
-Smart Trading Bot v7.3 Goldilocks
-Ausgewogener Kompromiss: TP bei 3.2R, Breakeven bei +1.0R, 2.0% Risiko per Trade.
+Smart Trading Bot v7.1 1H Multi-Ticker Double-Power-Trend (Alpaca, 16 Ticker)
+16 Trend-Aktien, TP 4.5R, BE 1.0R, Trail 1.8R, 2.5% Risiko per Trade.
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ ALPACA_KEY = os.getenv("ALPACA_API_KEY") or "PKNPBIXR7TIVOYWUONFKDOEGF4"
 ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY") or "9JqMriM1LHLsae3MppsBY97PHmWMhHEnHpQBzMvEgFeC"
 
 TICKERS = tuple(x.strip().upper() for x in os.getenv(
-    "BOT_TICKERS", "AAPL,NVDA,TSLA,MSFT,AMD,AMZN,META,GOOGL,QQQ,NFLX,AVGO,PLTR"
+    "BOT_TICKERS", "AAPL,NVDA,TSLA,MSFT,AMD,AMZN,META,GOOGL,NFLX,AVGO,PLTR,SMCI,ARM,COIN,MSTR,QQQ"
 ).split(",") if x.strip())
 REGIME_SYMBOL = os.getenv("BOT_REGIME_SYMBOL", "SPY").upper()
 
@@ -93,22 +93,22 @@ ENTRY_BEFORE_CLOSE_MIN = 30
 NY_TZ = "America/New_York"
 NY = ZoneInfo(NY_TZ)
 
-# GOLDILOCKS PARAMETER (V7.3 KOMPROMISS)
-ATR_STOP_MULTIPLIER = 1.5       # Ausgewogener Stop
-ATR_TARGET_MULTIPLIER = 3.2     # Take-Profit bei 3.2R
-BREAKEVEN_R = 1.0              # Breakeven ab +1.0R
-TRAIL_START_R = 1.5            # Trailing-Stop sichert ab +1.5R ab
+# V7.1 GEWINNER-PARAMETER
+ATR_STOP_MULTIPLIER = 1.5       # Enger Stop
+ATR_TARGET_MULTIPLIER = 4.5     # Starks Chance-Risiko-Verhältnis (1 : 3)
+BREAKEVEN_R = 1.0              # Breakeven ab +1R
+TRAIL_START_R = 1.8            # Trailing-Stop ab +1.8R
 TRAIL_ATR_MULTIPLIER = 1.0
-MAX_HOLD_DAYS = 4
+MAX_HOLD_DAYS = 5
 COOLDOWN_MINUTES = 60
 
-# RISIKO-KONTROLLE
-RISK_PCT_PER_TRADE = 0.020      # 2.0% Risiko pro Trade
+# COMPOUNDING SIZING
+RISK_PCT_PER_TRADE = 0.025      # 2.5% Risiko pro Trade
 MAX_POSITION_FRACTION = 0.95
 MAX_TOTAL_EXPOSURE = 0.95
-MAX_OPEN_POSITIONS = 3          # Max. 3 parallele Positionen
-MAX_DAILY_LOSS = 0.08
-MAX_DRAWDOWN = 0.22
+MAX_OPEN_POSITIONS = 4          # Max. 4 parallele Positionen
+MAX_DAILY_LOSS = 0.10
+MAX_DRAWDOWN = 0.25
 MIN_ORDER_VALUE = 10.0
 LOSS_STREAK_THROTTLE = 3
 LOSS_STREAK_RISK_FACTOR = 0.5
@@ -529,7 +529,7 @@ def submit_entry(symbol: str, qty: int, price: float, atr: float, bar_time: pd.T
     if qty <= 0 or stop <= 0 or stop >= price or target <= price:
         return False
 
-    client_id = f"smartv73-{symbol}-{int(bar_time.timestamp())}"[:48]
+    client_id = f"smartv71-{symbol}-{int(bar_time.timestamp())}"[:48]
     request = MarketOrderRequest(
         symbol=symbol,
         qty=qty,
@@ -568,13 +568,14 @@ def submit_entry(symbol: str, qty: int, price: float, atr: float, bar_time: pd.T
     state.save()
 
     notify(
-        f"🟢 **GEKAUFT: {symbol}** (Goldilocks v7.3)\n"
+        f"🟢 **GEKAUFT: {symbol}** (1H-Trend v7.1)\n"
         f"🕒 **Zeitpunkt:** {kauf_zeit}\n"
+        f"• **Score:** {score:.0f}/100\n"
         f"• **Menge:** {qty} Stück\n"
         f"• **Kaufpreis:** ${price:.2f}\n"
         f"• **Stop-Loss:** ${stop:.2f}\n"
         f"• **Take-Profit:** ${target:.2f}\n"
-        f"• **Max-Risiko:** ${max_risk_val:.2f} (2.0% Equity)"
+        f"• **Max-Risiko:** ${max_risk_val:.2f} (2.5% Equity)"
     )
     return True
 
@@ -838,9 +839,6 @@ def maybe_daily_summary(account: Any, daily_return: float, drawdown: float) -> N
 
         if pnl >= 0:
             profit_str = f"🟩 **Tagesprofit:** +${pnl:,.2f}"
-            loss_str = "flag"
-            loss_line = "2"
-            loss_str = "2"
             loss_str = "🟥 **Tagesverlust:** $0.00"
         else:
             profit_str = "🟩 **Tagesprofit:** $0.00"
@@ -889,7 +887,7 @@ def run_cycle() -> int:
 
 def live_main() -> None:
     init_clients()
-    notify(f"🚀 **Bot gestartet** (v7.3 Goldilocks)\nBeobachte: {', '.join(TICKERS)}")
+    notify(f"🚀 **Bot gestartet** (v7.1 1H Multi-Ticker Double-Power-Trend)\nBeobachte: {', '.join(TICKERS)}")
     consecutive_errors = 0
     while True:
         sleep_for = POLL_SECONDS
@@ -1069,14 +1067,14 @@ def run_backtest(days: int) -> None:
         raise SystemExit("Keine Daten für Backtest verfügbar.")
 
     result = simulate(frames)
-    print("\n=========== BACKTEST v7.3 Goldilocks ===========")
+    print("\n=========== BACKTEST v7.1 1H Multi-Ticker Double-Power-Trend ===========")
     print(f"Trades: {result['n_trades']}")
     if result["n_trades"]:
         print(f"Trefferquote: {result.get('win_rate', 0):.1%} | Ø Ergebnis: {result.get('avg_r', 0):+.2f}R | Rendite: {result.get('total_return', 0):+.2%} | Max. Drawdown: {result.get('max_drawdown', 0):.2%}")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Smart Trading Bot v7.3")
+    parser = argparse.ArgumentParser(description="Smart Trading Bot v7.1")
     parser.add_argument("--backtest", action="store_true")
     parser.add_argument("--days", type=int, default=120)
     args = parser.parse_args()
