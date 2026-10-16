@@ -1,6 +1,6 @@
 """
-Smart Trading Bot v7.0 1H Double-Power-Trend (Alpaca, 8 Ticker)
-Ziel: Kapitalverdopplung über 1-Stunden-Trends & Zinseszins (2.5% Risiko/Trade).
+Smart Trading Bot v7.2 Profit-Shield
+Fokus: Schneller Profit-Takeout, früher Breakeven-Schutz und reduziertes Risiko.
 """
 
 from __future__ import annotations
@@ -58,15 +58,15 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or "8859741833"
 ALPACA_KEY = os.getenv("ALPACA_API_KEY") or "PKNPBIXR7TIVOYWUONFKDOEGF4"
 ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY") or "9JqMriM1LHLsae3MppsBY97PHmWMhHEnHpQBzMvEgFeC"
 
+# Bereinigtes Ticker-Set ohne extrem spekulative Lücken-Werte
 TICKERS = tuple(x.strip().upper() for x in os.getenv(
-    "BOT_TICKERS", "AAPL,NVDA,TSLA,MSFT,AMD,AMZN,META,GOOGL"
+    "BOT_TICKERS", "AAPL,NVDA,TSLA,MSFT,AMD,AMZN,META,GOOGL,QQQ,NFLX,AVGO,PLTR"
 ).split(",") if x.strip())
 REGIME_SYMBOL = os.getenv("BOT_REGIME_SYMBOL", "SPY").upper()
 
 PAPER = os.getenv("BOT_PAPER", "1").strip() != "0"
 DATA_FEED_NAME = os.getenv("BOT_DATA_FEED", "iex").lower()
 
-# 1-STUNDEN-CHART FÜR SAUBERE TRENDS
 BAR_MINUTES = 60
 TF_INTRADAY = TimeFrame(1, TimeFrameUnit.Hour)
 
@@ -78,7 +78,7 @@ EMA_FAST = 20
 EMA_SLOW = 50
 ATR_PERIOD = 14
 VOL_LOOKBACK = 20
-MIN_REL_VOLUME = 1.1            # Volumen-Bestätigung
+MIN_REL_VOLUME = 1.1
 MIN_ATR_PCT = 0.002
 MAX_ATR_PCT = 0.05
 
@@ -94,23 +94,24 @@ ENTRY_BEFORE_CLOSE_MIN = 30
 NY_TZ = "America/New_York"
 NY = ZoneInfo(NY_TZ)
 
-ATR_STOP_MULTIPLIER = 1.5       # Enger Stop
-ATR_TARGET_MULTIPLIER = 4.5     # Starks Chance-Risiko-Verhältnis (1 : 3)
-BREAKEVEN_R = 1.0              # Breakeven ab +1R
-TRAIL_START_R = 1.8
-TRAIL_ATR_MULTIPLIER = 1.0
-MAX_HOLD_DAYS = 5
+# PROFIT-SHIELD PARAMETER
+ATR_STOP_MULTIPLIER = 1.2       # Engerer Stop
+ATR_TARGET_MULTIPLIER = 2.4     # Schnelle Gewinnmitnahme (CRV 1 : 2)
+BREAKEVEN_R = 0.5              # Breakeven bereits ab +0.5R
+TRAIL_START_R = 1.0            # Trailing-Stop sichert ab +1.0R Gewinne ab
+TRAIL_ATR_MULTIPLIER = 0.8
+MAX_HOLD_DAYS = 3
 COOLDOWN_MINUTES = 60
 
-# COMPOUNDING SIZING (Zinseszins für Kapitalverdopplung)
-RISK_PCT_PER_TRADE = 0.025      # 2.5% Risiko pro Trade
+# RISIKO-KONTROLLE
+RISK_PCT_PER_TRADE = 0.015      # Auf 1.5% gesenkt für flachere Drawdowns
 MAX_POSITION_FRACTION = 0.95
 MAX_TOTAL_EXPOSURE = 0.95
-MAX_OPEN_POSITIONS = 3
-MAX_DAILY_LOSS = 0.10
-MAX_DRAWDOWN = 0.25
+MAX_OPEN_POSITIONS = 3          # Max. 3 offene Trades
+MAX_DAILY_LOSS = 0.06
+MAX_DRAWDOWN = 0.20
 MIN_ORDER_VALUE = 10.0
-LOSS_STREAK_THROTTLE = 3
+LOSS_STREAK_THROTTLE = 2
 LOSS_STREAK_RISK_FACTOR = 0.5
 
 POLL_SECONDS = 120
@@ -127,7 +128,7 @@ STARTING_CAPITAL = 100_000.0
 
 
 # ============================================================
-# 2. LOGGING & TELEGRAM-VERBINDUNG
+# 2. LOGGING & TELEGRAM
 # ============================================================
 
 logger = logging.getLogger("smart_bot")
@@ -292,7 +293,7 @@ def init_clients() -> None:
 
 
 # ============================================================
-# 4. MARKTDATEN & 1H-INDIKATOREN
+# 4. MARKTDATEN & INDIKATOREN
 # ============================================================
 
 def fetch_bars(symbols: list[str] | tuple[str, ...], timeframe: Any, start: datetime) -> dict[str, pd.DataFrame]:
@@ -399,7 +400,7 @@ def attach_context(index: pd.Index, context: pd.DataFrame | None, column: str) -
     if idx.tz is None:
         idx = idx.tz_localize("UTC")
     days = idx.tz_convert(NY_TZ).tz_localize(None).normalize()
-    left = pd.DataFrame({"day": days.values.astype("datetime64[ns]")})
+    left = pd.DataFrame({"day": days.values.astype("datetime64[ns]" )})
     right = context[["day", column]].copy()
     right["day"] = pd.to_datetime(right["day"]).astype("datetime64[ns]")
     merged = pd.merge_asof(
@@ -529,7 +530,7 @@ def submit_entry(symbol: str, qty: int, price: float, atr: float, bar_time: pd.T
     if qty <= 0 or stop <= 0 or stop >= price or target <= price:
         return False
 
-    client_id = f"smartv70-{symbol}-{int(bar_time.timestamp())}"[:48]
+    client_id = f"smartv72-{symbol}-{int(bar_time.timestamp())}"[:48]
     request = MarketOrderRequest(
         symbol=symbol,
         qty=qty,
@@ -568,14 +569,13 @@ def submit_entry(symbol: str, qty: int, price: float, atr: float, bar_time: pd.T
     state.save()
 
     notify(
-        f"🟢 **GEKAUFT: {symbol}** (1H-Trend)\n"
+        f"🟢 **GEKAUFT: {symbol}** (Profit-Shield)\n"
         f"🕒 **Zeitpunkt:** {kauf_zeit}\n"
-        f"• **Score:** {score:.0f}/100\n"
         f"• **Menge:** {qty} Stück\n"
         f"• **Kaufpreis:** ${price:.2f}\n"
         f"• **Stop-Loss:** ${stop:.2f}\n"
         f"• **Take-Profit:** ${target:.2f}\n"
-        f"• **Max-Risiko:** ${max_risk_val:.2f} (2.5% Equity)"
+        f"• **Max-Risiko:** ${max_risk_val:.2f} (1.5% Equity)"
     )
     return True
 
@@ -619,7 +619,7 @@ def modify_stop(symbol: str, new_stop: float, open_orders: list[Any]) -> bool:
 
 
 # ============================================================
-# 7. POSITIONS-MONITORING
+# 7. POSITIONS-VERWALTUNG
 # ============================================================
 
 def reconcile_trades(positions: dict[str, Any], open_orders: list[Any]) -> None:
@@ -717,7 +717,7 @@ def manage_positions(positions: dict[str, Any], open_orders: list[Any]) -> None:
 
             desired = stop
             if r_multiple >= BREAKEVEN_R:
-                desired = max(desired, entry + 0.1 * risk)
+                desired = max(desired, entry + 0.05 * risk)
             if r_multiple >= TRAIL_START_R:
                 desired = max(desired, price - TRAIL_ATR_MULTIPLIER * float(trade["atr"]))
 
@@ -839,10 +839,6 @@ def maybe_daily_summary(account: Any, daily_return: float, drawdown: float) -> N
 
         if pnl >= 0:
             profit_str = f"🟩 **Tagesprofit:** +${pnl:,.2f}"
-            loss_str = "flag"
-            loss_line = "Diskreter Verlust"
-            loss_line = "2"
-            loss_str = "2"
             loss_str = "🟥 **Tagesverlust:** $0.00"
         else:
             profit_str = "🟩 **Tagesprofit:** $0.00"
@@ -891,7 +887,7 @@ def run_cycle() -> int:
 
 def live_main() -> None:
     init_clients()
-    notify(f"🚀 **Bot gestartet** (v7.0 1H Double-Power-Trend)\nBeobachte: {', '.join(TICKERS)}")
+    notify(f"🚀 **Bot gestartet** (v7.2 Profit-Shield)\nBeobachte: {', '.join(TICKERS)}")
     consecutive_errors = 0
     while True:
         sleep_for = POLL_SECONDS
@@ -999,7 +995,7 @@ def simulate(
             else:
                 r_mult = (close - position["entry"]) / position["risk"]
                 if r_mult >= BREAKEVEN_R:
-                    position["stop"] = max(position["stop"], position["entry"] + 0.1 * position["risk"])
+                    position["stop"] = max(position["stop"], position["entry"] + 0.05 * position["risk"])
                 if r_mult >= TRAIL_START_R:
                     position["stop"] = max(position["stop"], close - TRAIL_ATR_MULTIPLIER * position["atr"])
                 if ts - position["entry_ts"] > timedelta(days=MAX_HOLD_DAYS):
@@ -1071,14 +1067,14 @@ def run_backtest(days: int) -> None:
         raise SystemExit("Keine Daten für Backtest verfügbar.")
 
     result = simulate(frames)
-    print("\n=========== BACKTEST v7.0 1H Double-Power-Trend ===========")
+    print("\n=========== BACKTEST v7.2 Profit-Shield ===========")
     print(f"Trades: {result['n_trades']}")
     if result["n_trades"]:
         print(f"Trefferquote: {result.get('win_rate', 0):.1%} | Ø Ergebnis: {result.get('avg_r', 0):+.2f}R | Rendite: {result.get('total_return', 0):+.2%} | Max. Drawdown: {result.get('max_drawdown', 0):.2%}")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Smart Trading Bot v7.0")
+    parser = argparse.ArgumentParser(description="Smart Trading Bot v7.2")
     parser.add_argument("--backtest", action="store_true")
     parser.add_argument("--days", type=int, default=120)
     args = parser.parse_args()
