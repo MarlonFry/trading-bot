@@ -1,6 +1,7 @@
 """
 Smart Trading Bot v7.1 1H Multi-Ticker Double-Power-Trend (Alpaca, 16 Ticker)
 16 Trend-Aktien, TP 4.5R, BE 1.0R, Trail 1.8R, 2.5% Risiko per Trade.
+Einstiegsfenster: 15:45 Uhr bis 21:30 Uhr deutscher Zeit.
 """
 
 from __future__ import annotations
@@ -88,7 +89,7 @@ REGIME_EMA = 50
 
 SESSION_OPEN_MIN = 9 * 60 + 30
 SESSION_CLOSE_MIN = 16 * 60
-ENTRY_AFTER_OPEN_MIN = 30
+ENTRY_AFTER_OPEN_MIN = 15      # Start ab 15:45 Uhr deutscher Zeit
 ENTRY_BEFORE_CLOSE_MIN = 30
 NY_TZ = "America/New_York"
 NY = ZoneInfo(NY_TZ)
@@ -887,7 +888,7 @@ def run_cycle() -> int:
 
 def live_main() -> None:
     init_clients()
-    notify(f"🚀 **Bot gestartet** (v7.1 1H Multi-Ticker Double-Power-Trend)\nBeobachte: {', '.join(TICKERS)}")
+    notify(f"🚀 **Bot gestartet** (v7.1 1H Multi-Ticker Double-Power-Trend | Start ab 15:45)\nBeobachte: {', '.join(TICKERS)}")
     consecutive_errors = 0
     while True:
         sleep_for = POLL_SECONDS
@@ -1067,7 +1068,7 @@ def run_backtest(days: int) -> None:
         raise SystemExit("Keine Daten für Backtest verfügbar.")
 
     result = simulate(frames)
-    print("\n=========== BACKTEST v7.1 1H Multi-Ticker Double-Power-Trend ===========")
+    print("\n=========== BACKTEST v7.1 (Start 15:45) ===========")
     print(f"Trades: {result['n_trades']}")
     if result["n_trades"]:
         print(f"Trefferquote: {result.get('win_rate', 0):.1%} | Ø Ergebnis: {result.get('avg_r', 0):+.2f}R | Rendite: {result.get('total_return', 0):+.2%} | Max. Drawdown: {result.get('max_drawdown', 0):.2%}")
