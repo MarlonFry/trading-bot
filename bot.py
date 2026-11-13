@@ -1,6 +1,6 @@
 """
-Smart Trading Bot v7.1 1H Multi-Ticker Double-Power-Trend (Alpaca, 16 Ticker)
-16 Trend-Aktien, TP 4.5R, BE 1.0R, Trail 1.8R, 2.5% Risiko per Trade.
+Smart Trading Bot v8.0 Aggressive High-Winrate Edition (15M Multi-Ticker, 16 Ticker)
+15m-Chart, Dual-Trigger (Pullback + Breakout), TP 1.5R, BE +0.75R, Trail +1.0R, 3.0% Risiko.
 Einstiegsfenster: 15:45 Uhr bis 21:30 Uhr deutscher Zeit.
 """
 
@@ -11,7 +11,6 @@ import json
 import logging
 import math
 import os
-import sys
 import time
 from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
@@ -67,19 +66,21 @@ REGIME_SYMBOL = os.getenv("BOT_REGIME_SYMBOL", "SPY").upper()
 PAPER = os.getenv("BOT_PAPER", "1").strip() != "0"
 DATA_FEED_NAME = os.getenv("BOT_DATA_FEED", "iex").lower()
 
-BAR_MINUTES = 60
-TF_INTRADAY = TimeFrame(1, TimeFrameUnit.Hour)
+# 15-MINUTEN-TIMEFRAME FÜR SCHNELLE EINSTIEGE AB 15:45 UHR
+BAR_MINUTES = 15
+TF_INTRADAY = TimeFrame(15, TimeFrameUnit.Minute)
 
-# Indikatoren & Ausstieg
+# Indikatoren
 RSI_PERIOD = 14
-RSI_ENTRY_MAX = 52
-RSI_ENTRY_CEIL = 62
-EMA_FAST = 20
+RSI_PULLBACK_MAX = 58
+RSI_BREAKOUT_MAX = 72
+EMA_FAST = 9
+EMA_MID = 21
 EMA_SLOW = 50
 ATR_PERIOD = 14
 VOL_LOOKBACK = 20
-MIN_REL_VOLUME = 1.1
-MIN_ATR_PCT = 0.002
+MIN_REL_VOLUME = 0.85           # Optimiert für Alpaca IEX-Datenfeed
+MIN_ATR_PCT = 0.0012
 MAX_ATR_PCT = 0.05
 
 D_EMA_FAST = 20
@@ -89,35 +90,35 @@ REGIME_EMA = 50
 
 SESSION_OPEN_MIN = 9 * 60 + 30
 SESSION_CLOSE_MIN = 16 * 60
-ENTRY_AFTER_OPEN_MIN = 15      # Start ab 15:45 Uhr deutscher Zeit
-ENTRY_BEFORE_CLOSE_MIN = 30
+ENTRY_AFTER_OPEN_MIN = 15       # Start exakt ab 15:45 Uhr deutscher Zeit
+ENTRY_BEFORE_CLOSE_MIN = 30     # Letzter Einstieg 21:30 Uhr deutscher Zeit
 NY_TZ = "America/New_York"
 NY = ZoneInfo(NY_TZ)
 
-# V7.1 GEWINNER-PARAMETER
-ATR_STOP_MULTIPLIER = 1.5       # Enger Stop
-ATR_TARGET_MULTIPLIER = 4.5     # Starks Chance-Risiko-Verhältnis (1 : 3)
-BREAKEVEN_R = 1.0              # Breakeven ab +1R
-TRAIL_START_R = 1.8            # Trailing-Stop ab +1.8R
+# AGGRESSIVE HIGH-WINRATE PARAMETER (V8.0)
+ATR_STOP_MULTIPLIER = 1.8       # Genug Raum gegen Marktrauschen -> weniger Verlierer
+ATR_TARGET_MULTIPLIER = 2.7     # 1.5R Take-Profit -> hohe Trefferquote
+BREAKEVEN_R = 0.75              # Ab +0.75R Stop sofort ins Plus (Breakeven +0.1R)
+TRAIL_START_R = 1.0             # Ab +1.0R aktiver Trailing-Stop
 TRAIL_ATR_MULTIPLIER = 1.0
-MAX_HOLD_DAYS = 5
-COOLDOWN_MINUTES = 60
+MAX_HOLD_DAYS = 3
+COOLDOWN_MINUTES = 30           # Schneller Wiedereinstieg bei starken Trends
 
-# COMPOUNDING SIZING
-RISK_PCT_PER_TRADE = 0.025      # 2.5% Risiko pro Trade
+# AGGRESSIVES COMPOUNDING & RISIKO-MANAGEMENT
+RISK_PCT_PER_TRADE = 0.030      # 3.0% Risiko pro Trade
 MAX_POSITION_FRACTION = 0.95
 MAX_TOTAL_EXPOSURE = 0.95
-MAX_OPEN_POSITIONS = 4          # Max. 4 parallele Positionen
+MAX_OPEN_POSITIONS = 5          # Bis zu 5 parallele Gewinner-Positionen
 MAX_DAILY_LOSS = 0.10
 MAX_DRAWDOWN = 0.25
 MIN_ORDER_VALUE = 10.0
 LOSS_STREAK_THROTTLE = 3
-LOSS_STREAK_RISK_FACTOR = 0.5
+LOSS_STREAK_RISK_FACTOR = 0.6
 
-POLL_SECONDS = 120
+POLL_SECONDS = 30               # Alle 30 Sekunden Marktcheck
 POLL_SECONDS_CLOSED = 300
-MAX_BAR_LAG_MINUTES = 120
-INTRADAY_LOOKBACK_DAYS = 30
+MAX_BAR_LAG_MINUTES = 45
+INTRADAY_LOOKBACK_DAYS = 15
 DAILY_LOOKBACK_DAYS = 430
 MIN_BARS = EMA_SLOW + VOL_LOOKBACK + 5
 
@@ -167,12 +168,12 @@ def notify(message: str) -> None:
         "text": f"🤖 **Smart Trading Bot**\n{message}",
         "parse_mode": "Markdown",
     }
-    
+
     proxies = {
         "http": "http://proxy.server:3128",
         "https": "http://proxy.server:3128",
     }
-    
+
     for attempt in range(5):
         try:
             response = requests.post(url, json=payload, proxies=proxies, timeout=15)
@@ -205,6 +206,7 @@ class BotState:
             "last_bar": {},
             "cooldown": {},
             "summary_date": "",
+            "last_heartbeat": "",
         }
         self.load()
 
@@ -355,6 +357,7 @@ def add_indicators(frame: pd.DataFrame) -> pd.DataFrame:
     df.loc[(avg_gain == 0) & (avg_loss == 0), "rsi"] = 50
 
     df["ema_fast"] = close.ewm(span=EMA_FAST, adjust=False, min_periods=EMA_FAST).mean()
+    df["ema_mid"] = close.ewm(span=EMA_MID, adjust=False, min_periods=EMA_MID).mean()
     df["ema_slow"] = close.ewm(span=EMA_SLOW, adjust=False, min_periods=EMA_SLOW).mean()
 
     previous_close = close.shift(1)
@@ -387,8 +390,8 @@ def daily_context(daily: pd.DataFrame) -> pd.DataFrame:
     regime_ema = close.ewm(span=REGIME_EMA, adjust=False, min_periods=REGIME_EMA).mean()
     result = pd.DataFrame({
         "day": days.values.astype("datetime64[ns]"),
-        "trend_ok": ((close > sma) & (ema_fast > ema_slow)).to_numpy(),
-        "regime_ok": ((close > sma) & (close > regime_ema)).to_numpy(),
+        "trend_ok": ((close > ema_slow) & ((close > sma) | (ema_fast > ema_slow))).to_numpy(),
+        "regime_ok": (close > regime_ema).to_numpy(),
     })
     return result.drop_duplicates("day", keep="last").sort_values("day").reset_index(drop=True)
 
@@ -427,27 +430,40 @@ def build_signals(
     )
 
     rsi_previous = df["rsi"].shift(1)
-    setup = (
-        (rsi_previous < RSI_ENTRY_MAX)
+    prev_high = df["high"].shift(1)
+
+    # Trigger 1: Trend-Pullback Bounce (RSI dreht im Aufwärtstrend wieder nach oben)
+    pullback_setup = (
+        (rsi_previous < RSI_PULLBACK_MAX)
         & (df["rsi"] > rsi_previous)
-        & (df["rsi"] < RSI_ENTRY_CEIL)
+        & (df["ema_mid"] > df["ema_slow"])
     )
-    trend_ok = df["ema_fast"] > df["ema_slow"]
+
+    # Trigger 2: Aggressiver Momentum-Breakout über das Hoch der Vorkerze
+    breakout_setup = (
+        (df["close"] > prev_high)
+        & (df["ema_fast"] > df["ema_mid"])
+        & (df["ema_mid"] > df["ema_slow"])
+        & (df["rsi"] > 52)
+        & (df["rsi"] < RSI_BREAKOUT_MAX)
+    )
+
+    setup = pullback_setup | breakout_setup
     bullish_bar = df["close"] > df["open"]
-    volume_ok = df["rel_vol"] >= MIN_REL_VOLUME
+    volume_ok = df["rel_vol"].fillna(1.0) >= MIN_REL_VOLUME
     atr_pct = df["atr"] / df["close"]
     volatility_ok = (atr_pct >= MIN_ATR_PCT) & (atr_pct <= MAX_ATR_PCT)
     vwap_ok = df["close"] > df["vwap"]
 
     df["signal"] = (
-        setup & trend_ok & bullish_bar & volume_ok & volatility_ok & vwap_ok
+        setup & bullish_bar & volume_ok & volatility_ok & vwap_ok
         & df["trend_ok"] & df["regime_ok"] & time_ok
     ).fillna(False)
 
-    depth = ((RSI_ENTRY_MAX - rsi_previous) / RSI_ENTRY_MAX).clip(0, 1)
+    momentum_score = ((df["rsi"] - 40) / 35).clip(0, 1)
     trend_strength = ((df["ema_fast"] - df["ema_slow"]) / df["atr"].replace(0, np.nan)).clip(0, 2) / 2
-    volume_strength = (df["rel_vol"] / 2).clip(0, 1)
-    df["score"] = (50 * depth + 30 * trend_strength + 20 * volume_strength).fillna(0.0)
+    volume_strength = (df["rel_vol"].fillna(1.0) / 1.8).clip(0, 1)
+    df["score"] = (45 * momentum_score + 35 * trend_strength + 20 * volume_strength).fillna(0.0)
     return df
 
 
@@ -530,7 +546,7 @@ def submit_entry(symbol: str, qty: int, price: float, atr: float, bar_time: pd.T
     if qty <= 0 or stop <= 0 or stop >= price or target <= price:
         return False
 
-    client_id = f"smartv71-{symbol}-{int(bar_time.timestamp())}"[:48]
+    client_id = f"smartv80-{symbol}-{int(bar_time.timestamp())}"[:48]
     request = MarketOrderRequest(
         symbol=symbol,
         qty=qty,
@@ -569,14 +585,14 @@ def submit_entry(symbol: str, qty: int, price: float, atr: float, bar_time: pd.T
     state.save()
 
     notify(
-        f"🟢 **GEKAUFT: {symbol}** (1H-Trend v7.1)\n"
+        f"🟢 **GEKAUFT: {symbol}** (15M-Aggressive v8.0)\n"
         f"🕒 **Zeitpunkt:** {kauf_zeit}\n"
         f"• **Score:** {score:.0f}/100\n"
         f"• **Menge:** {qty} Stück\n"
         f"• **Kaufpreis:** ${price:.2f}\n"
         f"• **Stop-Loss:** ${stop:.2f}\n"
-        f"• **Take-Profit:** ${target:.2f}\n"
-        f"• **Max-Risiko:** ${max_risk_val:.2f} (2.5% Equity)"
+        f"• **Take-Profit:** ${target:.2f} (1.5R)\n"
+        f"• **Max-Risiko:** ${max_risk_val:.2f} (3.0% Equity)"
     )
     return True
 
@@ -601,6 +617,8 @@ def flatten(symbol: str, reason: str, open_orders: list[Any], last_price: float 
         if trade:
             trade["exit_reason"] = reason
             trade["exit_requested_at"] = utc_now().isoformat()
+            if last_price:
+                trade["last_known_price"] = float(last_price)
             state.save()
         notify(f"🔴 **VERKAUFT: {symbol}**\n• **Grund:** {reason}")
     except Exception:
@@ -637,7 +655,7 @@ def reconcile_trades(positions: dict[str, Any], open_orders: list[Any]) -> None:
                 submitted_at = submitted_at.replace(tzinfo=timezone.utc)
         except Exception:
             submitted_at = now
-        if (now - submitted_at).total_seconds() < 120:
+        if (now - submitted_at).total_seconds() < 60:
             continue
 
         entry = float(trade.get("entry", trade.get("entry_estimate", 0)) or 0)
@@ -651,6 +669,17 @@ def reconcile_trades(positions: dict[str, Any], open_orders: list[Any]) -> None:
             for leg in getattr(parent, "legs", None) or []:
                 if enum_value(leg.status) == "filled" and getattr(leg, "filled_avg_price", None):
                     exit_price = float(leg.filled_avg_price)
+
+            # Fallback für manuelle/Zeit-Exits über close_position()
+            if filled and exit_price is None:
+                closed_req = GetOrdersRequest(status=QueryOrderStatus.CLOSED, symbols=[symbol], limit=10)
+                for c_order in tc.get_orders(filter=closed_req):
+                    if enum_value(getattr(c_order, "side", "")) == "sell" and enum_value(getattr(c_order, "status", "")) == "filled":
+                        if getattr(c_order, "filled_avg_price", None):
+                            exit_price = float(c_order.filled_avg_price)
+                            break
+                if exit_price is None and trade.get("last_known_price"):
+                    exit_price = float(trade["last_known_price"])
         except Exception:
             continue
 
@@ -738,6 +767,7 @@ def manage_positions(positions: dict[str, Any], open_orders: list[Any]) -> None:
 
 _daily_cache: dict[str, Any] = {"date": None, "contexts": {}}
 
+
 def get_daily_contexts() -> dict[str, pd.DataFrame]:
     today = ny_now().date().isoformat()
     if _daily_cache["date"] == today and _daily_cache["contexts"]:
@@ -767,6 +797,7 @@ def scan_for_entries(account: Any, positions: dict[str, Any], open_orders: list[
     candidates_symbols = [symbol for symbol in TICKERS if symbol not in occupied]
     bars = fetch_bars(candidates_symbols, TF_INTRADAY, now - timedelta(days=INTRADAY_LOOKBACK_DAYS))
     candidates: list[tuple[float, str, float, float, pd.Timestamp]] = []
+    top_watch: tuple[float, str, float] | None = None
 
     for symbol in candidates_symbols:
         try:
@@ -792,6 +823,11 @@ def scan_for_entries(account: Any, positions: dict[str, Any], open_orders: list[
                 continue
 
             signals = build_signals(frame, contexts.get(symbol), regime_context)
+            last = signals.iloc[-1]
+            sc = float(last["score"])
+            if top_watch is None or sc > top_watch[0]:
+                top_watch = (sc, symbol, float(last["rsi"]))
+
             bar_time = signals.index[-1]
             bar_key = bar_time.isoformat()
             if state.data["last_bar"].get(symbol) == bar_key:
@@ -799,14 +835,24 @@ def scan_for_entries(account: Any, positions: dict[str, Any], open_orders: list[
             state.data["last_bar"][symbol] = bar_key
             state.save()
 
-            last = signals.iloc[-1]
             if bool(last["signal"]):
                 candidates.append((
-                    float(last["score"]), symbol, float(last["close"]),
+                    sc, symbol, float(last["close"]),
                     float(last["atr"]), bar_time
                 ))
         except Exception:
             pass
+
+    # Live-Heartbeat alle 15 Minuten ins Log schreiben
+    hb_slot = ny_now().strftime("%Y-%m-%d %H:") + f"{(ny_now().minute // 15) * 15:02d}"
+    if state.data.get("last_heartbeat") != hb_slot:
+        state.data["last_heartbeat"] = hb_slot
+        state.save()
+        if top_watch:
+            logger.info(
+                "🔍 Markt-Scan aktiv | Offene Positionen: %d/%d | Top-Kandidat: %s (Score %.0f, RSI %.1f) | Kaufsignale: %d",
+                len(occupied), MAX_OPEN_POSITIONS, top_watch[1], top_watch[0], top_watch[2], len(candidates)
+            )
 
     exposure = sum(abs(float(p.market_value)) for p in positions.values())
 
@@ -888,7 +934,7 @@ def run_cycle() -> int:
 
 def live_main() -> None:
     init_clients()
-    notify(f"🚀 **Bot gestartet** (v7.1 1H Multi-Ticker Double-Power-Trend | Start ab 15:45)\nBeobachte: {', '.join(TICKERS)}")
+    notify(f"🚀 **Bot gestartet** (v8.0 15M Aggressive High-Winrate | Start ab 15:45)\nBeobachte: {', '.join(TICKERS)}")
     consecutive_errors = 0
     while True:
         sleep_for = POLL_SECONDS
@@ -1039,7 +1085,6 @@ def simulate(
         result["max_drawdown"] = (equity_curve / equity_curve.cummax() - 1).min()
     if not trade_frame.empty:
         wins = trade_frame.loc[trade_frame["pnl"] > 0, "pnl"]
-        losses = trade_frame.loc[trade_frame["pnl"] <= 0, "pnl"]
         result["win_rate"] = len(wins) / len(trade_frame)
         result["avg_r"] = float(trade_frame["r"].mean())
     return result
@@ -1048,7 +1093,7 @@ def simulate(
 def run_backtest(days: int) -> None:
     init_clients()
     now = utc_now()
-    intraday = fetch_bars(list(TICKERS), TF_INTRADAY, now - timedelta(days=days + 20))
+    intraday = fetch_bars(list(TICKERS), TF_INTRADAY, now - timedelta(days=days + 15))
     daily = fetch_bars(list(TICKERS) + [REGIME_SYMBOL], TimeFrame.Day,
                        now - timedelta(days=days + DAILY_LOOKBACK_DAYS))
     if REGIME_SYMBOL not in daily:
@@ -1068,14 +1113,14 @@ def run_backtest(days: int) -> None:
         raise SystemExit("Keine Daten für Backtest verfügbar.")
 
     result = simulate(frames)
-    print("\n=========== BACKTEST v7.1 (Start 15:45) ===========")
+    print("\n=========== BACKTEST v8.0 15M Aggressive High-Winrate ===========")
     print(f"Trades: {result['n_trades']}")
     if result["n_trades"]:
         print(f"Trefferquote: {result.get('win_rate', 0):.1%} | Ø Ergebnis: {result.get('avg_r', 0):+.2f}R | Rendite: {result.get('total_return', 0):+.2%} | Max. Drawdown: {result.get('max_drawdown', 0):.2%}")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Smart Trading Bot v7.1")
+    parser = argparse.ArgumentParser(description="Smart Trading Bot v8.0")
     parser.add_argument("--backtest", action="store_true")
     parser.add_argument("--days", type=int, default=120)
     args = parser.parse_args()
