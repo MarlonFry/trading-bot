@@ -587,3 +587,552 @@ def submit_entry(symbol: str, qty: int, price: float, atr: float, bar_time: pd.T
         f"• **Kaufpreis:** ${price:.2f}\n"
         f"• **Stop-Loss:** ${stop:.2f}\n"
         f"• **Take-Profit:** ${target:.2f} (4.5R)\n"
+        f"• **Max-Risiko:** ${max_risk_val:.2f} (3.5% Equity)"
+    )
+    return True
+
+
+def cancel_symbol_orders(symbol: str, open_orders: list[Any]) -> None:
+    tc, _ = require_clients()
+    for order in open_orders:
+        if getattr(order, "symbol", None) == symbol:
+            try:
+                tc.cancel_order_by_id(order.id)
+            except Exception:
+                pass
+
+
+def flatten(symbol: str, reason: str, open_orders: list[Any], last_price: float | None = None) -> None:
+    tc, _ = require_clients()
+    try:
+        cancel_symbol_orders(symbol, open_orders)
+        time.sleep(1.0)
+        tc.close_position(symbol)
+        trade = state.trades.get(symbol)
+        if trade:
+            trade["exit_reason"] = reason
+            trade["exit_requested_at"] = utc_now().isoformat()
+            if last_price:
+                trade["last_known_price"] = float(last_price)
+            state.save()
+        notify(f"🔴 **VERKAUFT: {symbol}**\n• **Grund:** {reason}")
+    except Exception:
+        logger.exception("%s: Schließen fehlgeschlagen.", symbol)
+
+
+def modify_stop(symbol: str, new_stop: float, open_orders: list[Any]) -> bool:
+    tc, _ = require_clients()
+    order = find_stop_order(open_orders, symbol)
+    if order is None:
+        return False
+    try:
+        tc.replace_order_by_id(order.id, ReplaceOrderRequest(stop_price=round(new_stop, 2)))
+        return True
+    except Exception:
+        return False
+
+
+# ============================================================
+# 7. POSITIONS-VERWALTUNG
+# ============================================================
+
+def reconcile_trades(positions: dict[str, Any], open_orders: list[Any]) -> None:
+    tc, _ = require_clients()
+    symbols_with_orders = {getattr(o, "symbol", None) for o in open_orders}
+    now = utc_now()
+
+    for symbol, trade in list(state.trades.items()):
+        if symbol in positions or symbol in symbols_with_orders:
+            continue
+        try:
+            submitted_at = datetime.fromisoformat(trade["submitted_at"])
+            if submitted_at.tzinfo is None:
+                submitted_at = submitted_at.replace(tzinfo=timezone.utc)
+        except Exception:
+            submitted_at = now
+        if (now - submitted_at).total_seconds() < 120:
+            continue
+
+        entry = float(trade.get("entry", trade.get("entry_estimate", 0)) or 0)
+        exit_price = None
+        filled = False
+        try:
+            parent = tc.get_order_by_id(trade["order_id"])
+            filled = enum_value(parent.status) == "filled"
+            if getattr(parent, "filled_avg_price", None):
+                entry = float(parent.filled_avg_price)
+            for leg in getattr(parent, "legs", None) or []:
+                if enum_value(leg.status) == "filled" and getattr(leg, "filled_avg_price", None):
+                    exit_price = float(leg.filled_avg_price)
+
+            if filled and exit_price is None:
+                closed_req = GetOrdersRequest(status=QueryOrderStatus.CLOSED, symbols=[symbol], limit=10)
+                for c_order in tc.get_orders(filter=closed_req):
+                    if enum_value(getattr(c_order, "side", "")) == "sell" and enum_value(getattr(c_order, "status", "")) == "filled":
+                        if getattr(c_order, "filled_avg_price", None):
+                            exit_price = float(c_order.filled_avg_price)
+                            break
+                if exit_price is None and trade.get("last_known_price"):
+                    exit_price = float(trade["last_known_price"])
+        except Exception:
+            continue
+
+        state.trades.pop(symbol, None)
+        if not filled:
+            state.save()
+            continue
+
+        state.data["cooldown"][symbol] = now.isoformat()
+        risk = float(trade.get("risk_per_share", 0) or 0)
+        qty = int(trade.get("qty", 0) or 0)
+        verkauf_zeit = ny_now().strftime("%d.%m.%Y um %H:%M Uhr")
+
+        if exit_price and entry > 0 and risk > 0 and qty > 0:
+            r_multiple = (exit_price - entry) / risk
+            pnl = (exit_price - entry) * qty
+            state.record_result(r_multiple)
+
+            if pnl >= 0:
+                header = f"🟢 **VERKAUFT MIT GEWINN: {symbol}**"
+                pnl_str = f"🟩 **Gewinn:** +${pnl:.2f} (+{r_multiple:.2f}R)"
+            else:
+                header = f"🔴 **VERKAUFT MIT VERLUST: {symbol}**"
+                pnl_str = f"🟥 **Verlust:** -${abs(pnl):.2f} ({r_multiple:.2f}R)"
+
+            notify(
+                f"{header}\n"
+                f"🕒 **Zeitpunkt:** {verkauf_zeit}\n"
+                f"• **Kauf:** ${entry:.2f}\n"
+                f"• **Verkauf:** ${exit_price:.2f}\n"
+                f"• {pnl_str}"
+            )
+        state.save()
+
+
+def manage_positions(positions: dict[str, Any], open_orders: list[Any]) -> None:
+    now = utc_now()
+    for symbol, position in positions.items():
+        trade = state.trades.get(symbol)
+        if not trade:
+            continue
+        try:
+            price = float(position.current_price)
+            entry = float(position.avg_entry_price)
+            if price <= 0 or entry <= 0:
+                continue
+            if trade.get("status") == "pending":
+                trade["status"] = "open"
+                trade["entry"] = entry
+                trade["risk_per_share"] = max(entry - float(trade["initial_stop"]), 0.01)
+                state.save()
+
+            risk = max(float(trade.get("risk_per_share", 0.01)), 0.01)
+            stop = float(trade["stop"])
+            r_multiple = (price - entry) / risk
+
+            submitted_at = datetime.fromisoformat(trade["submitted_at"])
+            if submitted_at.tzinfo is None:
+                submitted_at = submitted_at.replace(tzinfo=timezone.utc)
+            age_days = (now - submitted_at).total_seconds() / 86400
+
+            if age_days > MAX_HOLD_DAYS:
+                flatten(symbol, f"Zeit-Exit nach {age_days:.1f} Tagen ({r_multiple:+.2f}R)", open_orders, price)
+                continue
+
+            desired = stop
+            if r_multiple >= BREAKEVEN_R:
+                desired = max(desired, entry + 0.1 * risk)
+            if r_multiple >= TRAIL_START_R:
+                desired = max(desired, price - TRAIL_ATR_MULTIPLIER * float(trade["atr"]))
+
+            desired = round(min(desired, price - 0.02), 2)
+            if desired >= stop + 0.01:
+                if modify_stop(symbol, desired, open_orders):
+                    trade["stop"] = desired
+                    state.save()
+                    notify(f"🔼 **{symbol}**: Stop auf ${desired:.2f} nachgezogen ({r_multiple:+.2f}R).")
+        except Exception:
+            logger.exception("%s: Fehler bei Positionsverwaltung.", symbol)
+
+
+# ============================================================
+# 8. EINSTIEGSSUCHE & TAGESKONTEXT
+# ============================================================
+
+_daily_cache: dict[str, Any] = {"date": None, "contexts": {}}
+
+
+def get_daily_contexts() -> dict[str, pd.DataFrame]:
+    today = ny_now().date().isoformat()
+    if _daily_cache["date"] == today and _daily_cache["contexts"]:
+        return _daily_cache["contexts"]
+    start = utc_now() - timedelta(days=DAILY_LOOKBACK_DAYS)
+    bars = fetch_bars(list(TICKERS) + [REGIME_SYMBOL], TimeFrame.Day, start)
+    contexts = {symbol: daily_context(frame) for symbol, frame in bars.items()}
+    _daily_cache.update(date=today, contexts=contexts)
+    return contexts
+
+
+def scan_for_entries(account: Any, positions: dict[str, Any], open_orders: list[Any]) -> None:
+    equity = float(account.equity)
+    cash = float(account.cash)
+    occupied = set(positions) | {getattr(o, "symbol", None) for o in open_orders}
+    occupied.discard(None)
+    slots = MAX_OPEN_POSITIONS - len(occupied)
+    if slots <= 0:
+        return
+
+    contexts = get_daily_contexts()
+    regime_context = contexts.get(REGIME_SYMBOL)
+    if regime_context is None or regime_context.empty:
+        return
+
+    now = utc_now()
+    candidates_symbols = [symbol for symbol in TICKERS if symbol not in occupied]
+    bars = fetch_bars(candidates_symbols, TF_INTRADAY, now - timedelta(days=INTRADAY_LOOKBACK_DAYS))
+    candidates: list[tuple[float, str, float, float, pd.Timestamp]] = []
+    top_watch: tuple[float, str, float] | None = None
+
+    for symbol in candidates_symbols:
+        try:
+            cooldown = state.data["cooldown"].get(symbol)
+            if cooldown:
+                cooldown_dt = datetime.fromisoformat(cooldown)
+                if cooldown_dt.tzinfo is None:
+                    cooldown_dt = cooldown_dt.replace(tzinfo=timezone.utc)
+                if now - cooldown_dt < timedelta(minutes=COOLDOWN_MINUTES):
+                    continue
+
+            frame = bars.get(symbol)
+            if frame is None:
+                continue
+            frame = regular_hours(frame)
+            frame = frame[frame.index + timedelta(minutes=BAR_MINUTES) <= now]
+            if len(frame) < MIN_BARS:
+                continue
+            last_bar_end = (frame.index[-1] + timedelta(minutes=BAR_MINUTES)).to_pydatetime()
+            if last_bar_end.tzinfo is None:
+                last_bar_end = last_bar_end.replace(tzinfo=timezone.utc)
+            if now - last_bar_end > timedelta(minutes=MAX_BAR_LAG_MINUTES):
+                continue
+
+            signals = build_signals(frame, contexts.get(symbol), regime_context)
+            last = signals.iloc[-1]
+            sc = float(last["score"])
+            if top_watch is None or sc > top_watch[0]:
+                top_watch = (sc, symbol, float(last["rsi"]))
+
+            bar_time = signals.index[-1]
+            bar_key = bar_time.isoformat()
+            if state.data["last_bar"].get(symbol) == bar_key:
+                continue
+            state.data["last_bar"][symbol] = bar_key
+            state.save()
+
+            if bool(last["signal"]):
+                candidates.append((
+                    sc, symbol, float(last["close"]),
+                    float(last["atr"]), bar_time
+                ))
+        except Exception:
+            pass
+
+    # Live-Heartbeat alle 15 Minuten ins Log schreiben
+    hb_slot = ny_now().strftime("%Y-%m-%d %H:") + f"{(ny_now().minute // 15) * 15:02d}"
+    if state.data.get("last_heartbeat") != hb_slot:
+        state.data["last_heartbeat"] = hb_slot
+        state.save()
+        if top_watch:
+            logger.info(
+                "🔍 Markt-Scan aktiv (v9.1) | Positionen: %d/%d | Top-Kandidat: %s (Score %.0f, RSI %.1f) | Signale: %d",
+                len(occupied), MAX_OPEN_POSITIONS, top_watch[1], top_watch[0], top_watch[2], len(candidates)
+            )
+
+    exposure = sum(abs(float(p.market_value)) for p in positions.values())
+
+    for score, symbol, price, atr, bar_time in sorted(candidates, reverse=True):
+        if slots <= 0:
+            break
+        qty = position_size(
+            equity=equity, cash=cash, price=price, atr=atr,
+            current_exposure=exposure, risk_factor=state.risk_factor(), score=score
+        )
+        if qty < 1:
+            continue
+        if submit_entry(symbol, qty, price, atr, bar_time, score):
+            slots -= 1
+            cost = qty * price
+            exposure += cost
+            cash -= cost
+
+
+# ============================================================
+# 9. TAGESBERICHT
+# ============================================================
+
+def maybe_daily_summary(account: Any, daily_return: float, drawdown: float) -> None:
+    now = ny_now()
+    today = now.date().isoformat()
+    if now.weekday() < 5 and now.hour >= 16 and state.data["summary_date"] != today:
+        equity = float(account.equity)
+        base_equity = float(state.data["day"].get("base_equity") or equity)
+        pnl = equity - base_equity
+
+        if pnl >= 0:
+            profit_str = f"🟩 **Tagesprofit:** +${pnl:,.2f}"
+            loss_str = "🟥 **Tagesverlust:** $0.00"
+        else:
+            profit_str = "🟩 **Tagesprofit:** $0.00"
+            loss_str = f"🟥 **Tagesverlust:** -${abs(pnl):,.2f}"
+
+        stats = state.stats
+        notify(
+            f"📊 **Tagesbericht**\n"
+            f"• **Kontostand:** ${equity:,.2f}\n"
+            f"• {profit_str}\n"
+            f"• {loss_str}\n"
+            f"• **Max. Rücksetzer:** {drawdown:.2%}\n"
+            f"• **Trades Gesamt:** {stats['wins']}W / {stats['losses']}L\n"
+            f"• **Performance:** {stats['total_r']:+.1f}R"
+        )
+        state.data["summary_date"] = today
+        state.save()
+
+
+def run_cycle() -> int:
+    tc, _ = require_clients()
+    clock = tc.get_clock()
+    account = tc.get_account()
+    equity = float(account.equity)
+    last_equity = float(account.last_equity) if getattr(account, "last_equity", None) else None
+    daily_return, drawdown = state.update_risk(equity, last_equity)
+
+    positions = get_positions()
+    orders = get_open_orders()
+    reconcile_trades(positions, orders)
+    positions = get_positions()
+    orders = get_open_orders()
+    manage_positions(positions, orders)
+
+    if not clock.is_open:
+        maybe_daily_summary(account, daily_return, drawdown)
+        return POLL_SECONDS_CLOSED
+
+    minutes_to_close = (clock.next_close - clock.timestamp).total_seconds() / 60
+    if state.data["kill_switch"] or state.data["day"].get("halted") or minutes_to_close < ENTRY_BEFORE_CLOSE_MIN:
+        return POLL_SECONDS
+
+    scan_for_entries(account, get_positions(), get_open_orders())
+    return POLL_SECONDS
+
+
+def live_main() -> None:
+    init_clients()
+    notify(
+        f"🚀 **Bot gestartet** (v9.1 High-Precision | {len(TICKERS)} Ticker | Start ab 15:45)\n"
+        f"Strategie: 3.5% Risiko | TP 4.5R | Strenge v7.1-Filter"
+    )
+    consecutive_errors = 0
+    while True:
+        sleep_for = POLL_SECONDS
+        try:
+            sleep_for = run_cycle()
+            consecutive_errors = 0
+        except KeyboardInterrupt:
+            notify("⏹️ **Bot manuell gestoppt**.")
+            return
+        except Exception:
+            consecutive_errors += 1
+            logger.exception("Fehler in Hauptschleife.")
+            sleep_for = min(POLL_SECONDS * (2 ** min(consecutive_errors, 4)), 600)
+        time.sleep(sleep_for)
+
+
+# ============================================================
+# 10. BACKTEST
+# ============================================================
+
+def simulate(
+    frames: dict[str, pd.DataFrame],
+    capital: float = STARTING_CAPITAL,
+    slippage_bps: float = SLIPPAGE_BPS,
+) -> dict[str, Any]:
+    if not frames:
+        return {"equity": pd.Series(dtype=float), "trades": pd.DataFrame(), "n_trades": 0}
+
+    slip = slippage_bps / 10_000
+    rows: dict[str, dict[pd.Timestamp, tuple]] = {}
+    for symbol, frame in frames.items():
+        rows[symbol] = {}
+        for ts, row in frame.iterrows():
+            rows[symbol][ts] = (
+                float(row["open"]), float(row["high"]), float(row["low"]),
+                float(row["close"]), float(row["atr"]), bool(row["signal"]),
+                float(row["score"])
+            )
+
+    timestamps = sorted(set().union(*(set(frame.index) for frame in frames.values())))
+    cash = float(capital)
+    positions: dict[str, dict[str, Any]] = {}
+    last_close: dict[str, float] = {}
+    last_exit: dict[str, pd.Timestamp] = {}
+    pending: list[tuple] = []
+    trades: list[dict[str, Any]] = []
+    curve: list[tuple[pd.Timestamp, float]] = []
+    consecutive_losses = 0
+    current_day = None
+    day_start_equity = capital
+    halted = False
+
+    for ts in timestamps:
+        for symbol in frames:
+            row = rows[symbol].get(ts)
+            if row:
+                last_close[symbol] = row[3]
+
+        day = ts.tz_convert(NY_TZ).date() if ts.tzinfo else ts.date()
+        if day != current_day:
+            current_day = day
+            day_start_equity = curve[-1][1] if curve else capital
+            halted = False
+
+        for signal_ts, score, symbol, signal_close, signal_atr in sorted(pending, key=lambda item: -item[1]):
+            row = rows[symbol].get(ts)
+            if row is None or symbol in positions or len(positions) >= MAX_OPEN_POSITIONS or halted:
+                continue
+            if ts <= signal_ts or ts - signal_ts > timedelta(minutes=2 * BAR_MINUTES):
+                continue
+            if symbol in last_exit and ts - last_exit[symbol] < timedelta(minutes=COOLDOWN_MINUTES):
+                continue
+
+            entry = row[0] * (1 + slip)
+            stop = signal_close - ATR_STOP_MULTIPLIER * signal_atr
+            target = signal_close + ATR_TARGET_MULTIPLIER * signal_atr
+            if entry <= stop + 0.01 or target <= entry:
+                continue
+
+            exposure = sum(p["qty"] * last_close.get(s, p["entry"]) for s, p in positions.items())
+            equity_now = cash + exposure
+            risk_factor = LOSS_STREAK_RISK_FACTOR if consecutive_losses >= LOSS_STREAK_THROTTLE else 1.0
+            qty = position_size(
+                equity_now, cash, entry, signal_atr, exposure, risk_factor, score
+            )
+            if qty < 1:
+                continue
+            cash -= qty * entry
+            positions[symbol] = {
+                "qty": qty, "entry": entry, "stop": stop, "target": target,
+                "atr": signal_atr, "risk": max(entry - stop, 0.01), "entry_ts": ts
+            }
+        pending = []
+
+        for symbol, position in list(positions.items()):
+            row = rows[symbol].get(ts)
+            if row is None:
+                continue
+            o, high, low, close = row[:4]
+            exit_price = None
+            if low <= position["stop"]:
+                exit_price = min(o, position["stop"]) * (1 - slip)
+            elif high >= position["target"]:
+                exit_price = max(o, position["target"])
+            else:
+                r_mult = (close - position["entry"]) / position["risk"]
+                if r_mult >= BREAKEVEN_R:
+                    position["stop"] = max(position["stop"], position["entry"] + 0.1 * position["risk"])
+                if r_mult >= TRAIL_START_R:
+                    position["stop"] = max(position["stop"], close - TRAIL_ATR_MULTIPLIER * position["atr"])
+                if ts - position["entry_ts"] > timedelta(days=MAX_HOLD_DAYS):
+                    exit_price = close * (1 - slip)
+
+            if exit_price is not None:
+                qty = position["qty"]
+                cash += qty * exit_price
+                pnl = (exit_price - position["entry"]) * qty
+                r_multiple = (exit_price - position["entry"]) / position["risk"]
+                trades.append({
+                    "symbol": symbol, "entry_ts": position["entry_ts"], "exit_ts": ts,
+                    "r": r_multiple, "pnl": pnl
+                })
+                if r_multiple < -0.05:
+                    consecutive_losses += 1
+                elif r_multiple > 0.05:
+                    consecutive_losses = 0
+                last_exit[symbol] = ts
+                del positions[symbol]
+
+        equity = cash + sum(p["qty"] * last_close.get(s, p["entry"]) for s, p in positions.items())
+        if day_start_equity > 0 and equity / day_start_equity - 1 <= -MAX_DAILY_LOSS:
+            halted = True
+        curve.append((ts, equity))
+
+        for symbol in frames:
+            row = rows[symbol].get(ts)
+            if row and row[5] and symbol not in positions:
+                pending.append((ts, row[6], symbol, row[3], row[4]))
+
+    equity_curve = pd.Series([value for _, value in curve], index=[ts for ts, _ in curve])
+    trade_frame = pd.DataFrame(trades)
+    result: dict[str, Any] = {
+        "equity": equity_curve, "trades": trade_frame,
+        "open_positions": len(positions), "n_trades": len(trade_frame)
+    }
+    if not equity_curve.empty:
+        result["total_return"] = equity_curve.iloc[-1] / capital - 1
+        result["max_drawdown"] = (equity_curve / equity_curve.cummax() - 1).min()
+    if not trade_frame.empty:
+        wins = trade_frame.loc[trade_frame["pnl"] > 0, "pnl"]
+        result["win_rate"] = len(wins) / len(trade_frame)
+        result["avg_r"] = float(trade_frame["r"].mean())
+    return result
+
+
+def run_backtest(days: int) -> None:
+    init_clients()
+    now = utc_now()
+    intraday = fetch_bars(list(TICKERS), TF_INTRADAY, now - timedelta(days=days + 20))
+    daily = fetch_bars(list(TICKERS) + [REGIME_SYMBOL], TimeFrame.Day,
+                       now - timedelta(days=days + DAILY_LOOKBACK_DAYS))
+    if REGIME_SYMBOL not in daily:
+        raise SystemExit("Keine SPY Tagesdaten verfügbar.")
+    regime_context = daily_context(daily[REGIME_SYMBOL])
+    cutoff = now - timedelta(days=days)
+    frames = {}
+    for symbol in TICKERS:
+        if symbol not in intraday or symbol not in daily:
+            continue
+        regular = regular_hours(intraday[symbol])
+        signals = build_signals(regular, daily_context(daily[symbol]), regime_context)
+        signals = signals.loc[signals.index >= cutoff]
+        if not signals.empty:
+            frames[symbol] = signals
+    if not frames:
+        raise SystemExit("Keine Daten für Backtest verfügbar.")
+
+    result = simulate(frames)
+    print(f"\n=========== BACKTEST v9.1 High-Precision ({len(TICKERS)} Ticker, 1H) ===========")
+    print(f"Trades: {result['n_trades']}")
+    if result["n_trades"]:
+        print(
+            f"Trefferquote: {result.get('win_rate', 0):.1%} | Ø Ergebnis: {result.get('avg_r', 0):+.2f}R | "
+            f"Rendite: {result.get('total_return', 0):+.2%} | Max. Drawdown: {result.get('max_drawdown', 0):.2%}"
+        )
+        tdf = result["trades"]
+        top_syms = tdf.groupby("symbol")["pnl"].sum().sort_values(ascending=False).head(3)
+        top_str = ", ".join(f"{s} ({v:+,.0f}$)" for s, v in top_syms.items())
+        print(f"Top-Gewinner: {top_str}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Smart Trading Bot v9.1 High-Precision")
+    parser.add_argument("--backtest", action="store_true")
+    parser.add_argument("--days", type=int, default=120)
+    args = parser.parse_args()
+    if args.backtest:
+        run_backtest(args.days)
+    else:
+        live_main()
+
+
+if __name__ == "__main__":
+    main()
