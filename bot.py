@@ -1,7 +1,7 @@
 """
-Smart Trading Bot v8.0 Aggressive High-Winrate Edition (15M Multi-Ticker, 16 Ticker)
-15m-Chart, Dual-Trigger (Pullback + Breakout), TP 1.5R, BE +0.75R, Trail +1.0R, 3.0% Risiko.
-Einstiegsfenster: 15:45 Uhr bis 21:30 Uhr deutscher Zeit.
+Smart Trading Bot v9.0 Maximum-Yield Edition (1H Multi-Sector Trend + Margin Compounding)
+36 Trend-Aktien, TP 4.8R, SL 1.5R, BE 0.9R, Trail 1.6R, 3.5% Basis-Risiko (+ Conviction-Boost), 1.8x Exposure.
+Einstiegsfenster: 15:45 Uhr bis 21:30 Uhr deutscher Zeit + 15-Minuten Live-Heartbeat.
 """
 
 from __future__ import annotations
@@ -58,30 +58,33 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or "8859741833"
 ALPACA_KEY = os.getenv("ALPACA_API_KEY") or "PKNPBIXR7TIVOYWUONFKDOEGF4"
 ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY") or "9JqMriM1LHLsae3MppsBY97PHmWMhHEnHpQBzMvEgFeC"
 
-TICKERS = tuple(x.strip().upper() for x in os.getenv(
-    "BOT_TICKERS", "AAPL,NVDA,TSLA,MSFT,AMD,AMZN,META,GOOGL,NFLX,AVGO,PLTR,SMCI,ARM,COIN,MSTR,QQQ"
-).split(",") if x.strip())
+# 36 liquide US-Trendaktien über mehrere Sektoren für maximale Setup-Dichte
+DEFAULT_TICKERS = (
+    "AAPL,NVDA,TSLA,MSFT,AMD,AMZN,META,GOOGL,NFLX,AVGO,PLTR,SMCI,ARM,COIN,MSTR,QQQ,"
+    "CRWD,PANW,UBER,SHOP,MU,QCOM,ORCL,CRM,NOW,LLY,JPM,GS,SPOT,SNOW,ANET,APP,TSM,ISRG,V,DDOG"
+)
+TICKERS = tuple(dict.fromkeys(
+    x.strip().upper() for x in os.getenv("BOT_TICKERS", DEFAULT_TICKERS).split(",") if x.strip()
+))
 REGIME_SYMBOL = os.getenv("BOT_REGIME_SYMBOL", "SPY").upper()
 
 PAPER = os.getenv("BOT_PAPER", "1").strip() != "0"
 DATA_FEED_NAME = os.getenv("BOT_DATA_FEED", "iex").lower()
 
-# 15-MINUTEN-TIMEFRAME FÜR SCHNELLE EINSTIEGE AB 15:45 UHR
-BAR_MINUTES = 15
-TF_INTRADAY = TimeFrame(15, TimeFrameUnit.Minute)
+BAR_MINUTES = 60
+TF_INTRADAY = TimeFrame(1, TimeFrameUnit.Hour)
 
-# Indikatoren
+# Indikatoren & Einstiegsfilter (leicht geöffnet für starke Trend-Fortsetzungen)
 RSI_PERIOD = 14
-RSI_PULLBACK_MAX = 58
-RSI_BREAKOUT_MAX = 72
-EMA_FAST = 9
-EMA_MID = 21
+RSI_ENTRY_MAX = 55              # Vorher 52 -> nimmt auch flachere Pullbacks im starken Aufwärtstrend mit
+RSI_ENTRY_CEIL = 65
+EMA_FAST = 20
 EMA_SLOW = 50
 ATR_PERIOD = 14
 VOL_LOOKBACK = 20
-MIN_REL_VOLUME = 0.85           # Optimiert für Alpaca IEX-Datenfeed
-MIN_ATR_PCT = 0.0012
-MAX_ATR_PCT = 0.05
+MIN_REL_VOLUME = 1.05
+MIN_ATR_PCT = 0.002
+MAX_ATR_PCT = 0.06
 
 D_EMA_FAST = 20
 D_EMA_SLOW = 50
@@ -90,35 +93,35 @@ REGIME_EMA = 50
 
 SESSION_OPEN_MIN = 9 * 60 + 30
 SESSION_CLOSE_MIN = 16 * 60
-ENTRY_AFTER_OPEN_MIN = 15       # Start exakt ab 15:45 Uhr deutscher Zeit
+ENTRY_AFTER_OPEN_MIN = 15       # Start ab 15:45 Uhr deutscher Zeit
 ENTRY_BEFORE_CLOSE_MIN = 30     # Letzter Einstieg 21:30 Uhr deutscher Zeit
 NY_TZ = "America/New_York"
 NY = ZoneInfo(NY_TZ)
 
-# AGGRESSIVE HIGH-WINRATE PARAMETER (V8.0)
-ATR_STOP_MULTIPLIER = 1.8       # Genug Raum gegen Marktrauschen -> weniger Verlierer
-ATR_TARGET_MULTIPLIER = 2.7     # 1.5R Take-Profit -> hohe Trefferquote
-BREAKEVEN_R = 0.75              # Ab +0.75R Stop sofort ins Plus (Breakeven +0.1R)
-TRAIL_START_R = 1.0             # Ab +1.0R aktiver Trailing-Stop
+# V9.0 MAXIMUM-YIELD PARAMETER
+ATR_STOP_MULTIPLIER = 1.5       # Enger Stop
+ATR_TARGET_MULTIPLIER = 4.8     # 1 : 3.2 Chance-Risiko-Verhältnis für maximale Gewinner
+BREAKEVEN_R = 0.9               # Stop ab +0.9R ins Plus ziehen
+TRAIL_START_R = 1.6             # Trailing-Stop ab +1.6R aktivieren
 TRAIL_ATR_MULTIPLIER = 1.0
-MAX_HOLD_DAYS = 3
-COOLDOWN_MINUTES = 30           # Schneller Wiedereinstieg bei starken Trends
+MAX_HOLD_DAYS = 5
+COOLDOWN_MINUTES = 60
 
-# AGGRESSIVES COMPOUNDING & RISIKO-MANAGEMENT
-RISK_PCT_PER_TRADE = 0.030      # 3.0% Risiko pro Trade
-MAX_POSITION_FRACTION = 0.95
-MAX_TOTAL_EXPOSURE = 0.95
-MAX_OPEN_POSITIONS = 5          # Bis zu 5 parallele Gewinner-Positionen
-MAX_DAILY_LOSS = 0.10
+# AGGRESSIVES MARGIN-COMPOUNDING
+RISK_PCT_PER_TRADE = 0.035      # 3.5% Basis-Risiko pro Trade (bis ~4.4% bei High-Score)
+MAX_POSITION_FRACTION = 0.45    # Max. 45% Equity pro Einzelaktie -> Platz für 4-6 parallele Trends
+MAX_TOTAL_EXPOSURE = 1.80       # Nutzt bis zu 1.8x Alpaca Buying Power (sicher unter 2.0x Overnight-Limit)
+MAX_OPEN_POSITIONS = 6          # Bis zu 6 parallele Gewinner-Positionen
+MAX_DAILY_LOSS = 0.12
 MAX_DRAWDOWN = 0.25
 MIN_ORDER_VALUE = 10.0
 LOSS_STREAK_THROTTLE = 3
-LOSS_STREAK_RISK_FACTOR = 0.6
+LOSS_STREAK_RISK_FACTOR = 0.55
 
-POLL_SECONDS = 30               # Alle 30 Sekunden Marktcheck
+POLL_SECONDS = 120
 POLL_SECONDS_CLOSED = 300
-MAX_BAR_LAG_MINUTES = 45
-INTRADAY_LOOKBACK_DAYS = 15
+MAX_BAR_LAG_MINUTES = 120
+INTRADAY_LOOKBACK_DAYS = 30
 DAILY_LOOKBACK_DAYS = 430
 MIN_BARS = EMA_SLOW + VOL_LOOKBACK + 5
 
@@ -291,7 +294,7 @@ def init_clients() -> None:
     trading_client = TradingClient(ALPACA_KEY, ALPACA_SECRET, paper=PAPER)
     data_client = StockHistoricalDataClient(ALPACA_KEY, ALPACA_SECRET)
     account = trading_client.get_account()
-    logger.info("Alpaca verbunden. Paper=%s, Status=%s", PAPER, account.status)
+    logger.info("Alpaca verbunden. Paper=%s, Status=%s, BuyingPower=$%s", PAPER, account.status, account.buying_power)
 
 
 # ============================================================
@@ -299,34 +302,41 @@ def init_clients() -> None:
 # ============================================================
 
 def fetch_bars(symbols: list[str] | tuple[str, ...], timeframe: Any, start: datetime) -> dict[str, pd.DataFrame]:
-    if not symbols:
+    symbol_list = list(symbols)
+    if not symbol_list:
         return {}
     assert data_client is not None
     feed = DataFeed.SIP if DATA_FEED_NAME == "sip" else DataFeed.IEX
-    request = StockBarsRequest(
-        symbol_or_symbols=list(symbols),
-        timeframe=timeframe,
-        start=start,
-        adjustment=Adjustment.ALL,
-        feed=feed,
-    )
-    raw = data_client.get_stock_bars(request).df
-    if raw is None or raw.empty:
-        return {}
 
     output: dict[str, pd.DataFrame] = {}
     required = ["open", "high", "low", "close", "volume"]
-    for symbol in symbols:
-        try:
-            frame = raw.xs(symbol, level=0).copy() if isinstance(raw.index, pd.MultiIndex) else raw.copy()
-        except KeyError:
+
+    # Batches à 18 Ticker, damit die API-Anfrage bei 36+ Aktien immer stabil bleibt
+    for i in range(0, len(symbol_list), 18):
+        batch = symbol_list[i:i + 18]
+        request = StockBarsRequest(
+            symbol_or_symbols=batch,
+            timeframe=timeframe,
+            start=start,
+            adjustment=Adjustment.ALL,
+            feed=feed,
+        )
+        raw = data_client.get_stock_bars(request).df
+        if raw is None or raw.empty:
             continue
-        frame = frame.sort_index()
-        frame = frame[~frame.index.duplicated(keep="last")]
-        frame = frame.dropna(subset=required)
-        frame = frame[(frame["close"] > 0) & (frame["volume"] >= 0)]
-        if not frame.empty:
-            output[symbol] = frame
+
+        for symbol in batch:
+            try:
+                frame = raw.xs(symbol, level=0).copy() if isinstance(raw.index, pd.MultiIndex) else raw.copy()
+            except KeyError:
+                continue
+            frame = frame.sort_index()
+            frame = frame[~frame.index.duplicated(keep="last")]
+            frame = frame.dropna(subset=required)
+            frame = frame[(frame["close"] > 0) & (frame["volume"] >= 0)]
+            if not frame.empty:
+                output[symbol] = frame
+
     return output
 
 
@@ -357,7 +367,6 @@ def add_indicators(frame: pd.DataFrame) -> pd.DataFrame:
     df.loc[(avg_gain == 0) & (avg_loss == 0), "rsi"] = 50
 
     df["ema_fast"] = close.ewm(span=EMA_FAST, adjust=False, min_periods=EMA_FAST).mean()
-    df["ema_mid"] = close.ewm(span=EMA_MID, adjust=False, min_periods=EMA_MID).mean()
     df["ema_slow"] = close.ewm(span=EMA_SLOW, adjust=False, min_periods=EMA_SLOW).mean()
 
     previous_close = close.shift(1)
@@ -390,8 +399,8 @@ def daily_context(daily: pd.DataFrame) -> pd.DataFrame:
     regime_ema = close.ewm(span=REGIME_EMA, adjust=False, min_periods=REGIME_EMA).mean()
     result = pd.DataFrame({
         "day": days.values.astype("datetime64[ns]"),
-        "trend_ok": ((close > ema_slow) & ((close > sma) | (ema_fast > ema_slow))).to_numpy(),
-        "regime_ok": (close > regime_ema).to_numpy(),
+        "trend_ok": ((close > sma) & (ema_fast > ema_slow)).to_numpy(),
+        "regime_ok": ((close > sma) & (close > regime_ema)).to_numpy(),
     })
     return result.drop_duplicates("day", keep="last").sort_values("day").reset_index(drop=True)
 
@@ -430,73 +439,62 @@ def build_signals(
     )
 
     rsi_previous = df["rsi"].shift(1)
-    prev_high = df["high"].shift(1)
-
-    # Trigger 1: Trend-Pullback Bounce (RSI dreht im Aufwärtstrend wieder nach oben)
-    pullback_setup = (
-        (rsi_previous < RSI_PULLBACK_MAX)
+    setup = (
+        (rsi_previous < RSI_ENTRY_MAX)
         & (df["rsi"] > rsi_previous)
-        & (df["ema_mid"] > df["ema_slow"])
+        & (df["rsi"] < RSI_ENTRY_CEIL)
     )
-
-    # Trigger 2: Aggressiver Momentum-Breakout über das Hoch der Vorkerze
-    breakout_setup = (
-        (df["close"] > prev_high)
-        & (df["ema_fast"] > df["ema_mid"])
-        & (df["ema_mid"] > df["ema_slow"])
-        & (df["rsi"] > 52)
-        & (df["rsi"] < RSI_BREAKOUT_MAX)
-    )
-
-    setup = pullback_setup | breakout_setup
+    trend_ok = df["ema_fast"] > df["ema_slow"]
     bullish_bar = df["close"] > df["open"]
-    volume_ok = df["rel_vol"].fillna(1.0) >= MIN_REL_VOLUME
+    volume_ok = df["rel_vol"] >= MIN_REL_VOLUME
     atr_pct = df["atr"] / df["close"]
     volatility_ok = (atr_pct >= MIN_ATR_PCT) & (atr_pct <= MAX_ATR_PCT)
     vwap_ok = df["close"] > df["vwap"]
 
     df["signal"] = (
-        setup & bullish_bar & volume_ok & volatility_ok & vwap_ok
+        setup & trend_ok & bullish_bar & volume_ok & volatility_ok & vwap_ok
         & df["trend_ok"] & df["regime_ok"] & time_ok
     ).fillna(False)
 
-    momentum_score = ((df["rsi"] - 40) / 35).clip(0, 1)
+    depth = ((RSI_ENTRY_MAX - rsi_previous) / RSI_ENTRY_MAX).clip(0, 1)
     trend_strength = ((df["ema_fast"] - df["ema_slow"]) / df["atr"].replace(0, np.nan)).clip(0, 2) / 2
-    volume_strength = (df["rel_vol"].fillna(1.0) / 1.8).clip(0, 1)
-    df["score"] = (45 * momentum_score + 35 * trend_strength + 20 * volume_strength).fillna(0.0)
+    volume_strength = (df["rel_vol"] / 2).clip(0, 1)
+    df["score"] = (50 * depth + 30 * trend_strength + 20 * volume_strength).fillna(0.0)
     return df
 
 
 # ============================================================
-# 5. POSITION SIZING
+# 5. POSITION SIZING (CONVICTION-BOOST + MARGIN-COMPOUNDING)
 # ============================================================
 
 def position_size(
     equity: float,
-    cash: float,
+    buying_power: float,
     price: float,
     atr: float,
     current_exposure: float,
     risk_factor: float,
     score: float,
 ) -> int:
-    values = [equity, cash, price, atr, risk_factor]
-    if not all(math.isfinite(v) for v in values) or min(equity, cash, price, atr) <= 0:
+    values = [equity, buying_power, price, atr, risk_factor]
+    if not all(math.isfinite(v) for v in values) or min(equity, buying_power, price, atr) <= 0:
         return 0
 
     stop_distance = ATR_STOP_MULTIPLIER * atr
     if not math.isfinite(stop_distance) or stop_distance <= 0:
         return 0
 
-    target_risk = equity * RISK_PCT_PER_TRADE * risk_factor
+    # Conviction-Multiplikator: High-Score Setups (>= 70) erhalten 1.25x Positionsgröße
+    conviction_mult = 1.25 if score >= 70 else (1.05 if score >= 55 else 0.90)
+    target_risk = equity * RISK_PCT_PER_TRADE * risk_factor * conviction_mult
     qty_by_risk = int(target_risk / stop_distance)
 
     exposure_budget = max(0.0, equity * MAX_TOTAL_EXPOSURE - current_exposure)
     position_cap = equity * MAX_POSITION_FRACTION
-    spend_budget = min(cash, exposure_budget, position_cap)
-    qty_by_cash = int(spend_budget / price)
+    spend_budget = min(buying_power, exposure_budget, position_cap)
+    qty_by_budget = int(spend_budget / price)
 
-    qty = min(qty_by_risk, qty_by_cash)
+    qty = min(qty_by_risk, qty_by_budget)
     if qty < 1 or qty * price < MIN_ORDER_VALUE:
         return 0
     return qty
@@ -546,7 +544,7 @@ def submit_entry(symbol: str, qty: int, price: float, atr: float, bar_time: pd.T
     if qty <= 0 or stop <= 0 or stop >= price or target <= price:
         return False
 
-    client_id = f"smartv80-{symbol}-{int(bar_time.timestamp())}"[:48]
+    client_id = f"smartv90-{symbol}-{int(bar_time.timestamp())}"[:48]
     request = MarketOrderRequest(
         symbol=symbol,
         qty=qty,
@@ -585,14 +583,14 @@ def submit_entry(symbol: str, qty: int, price: float, atr: float, bar_time: pd.T
     state.save()
 
     notify(
-        f"🟢 **GEKAUFT: {symbol}** (15M-Aggressive v8.0)\n"
+        f"🟢 **GEKAUFT: {symbol}** (1H-MaxYield v9.0)\n"
         f"🕒 **Zeitpunkt:** {kauf_zeit}\n"
         f"• **Score:** {score:.0f}/100\n"
-        f"• **Menge:** {qty} Stück\n"
+        f"• **Menge:** {qty} Stück (${qty * price:,.2f})\n"
         f"• **Kaufpreis:** ${price:.2f}\n"
         f"• **Stop-Loss:** ${stop:.2f}\n"
-        f"• **Take-Profit:** ${target:.2f} (1.5R)\n"
-        f"• **Max-Risiko:** ${max_risk_val:.2f} (3.0% Equity)"
+        f"• **Take-Profit:** ${target:.2f} (4.8R)\n"
+        f"• **Max-Risiko:** ${max_risk_val:.2f}"
     )
     return True
 
@@ -655,7 +653,7 @@ def reconcile_trades(positions: dict[str, Any], open_orders: list[Any]) -> None:
                 submitted_at = submitted_at.replace(tzinfo=timezone.utc)
         except Exception:
             submitted_at = now
-        if (now - submitted_at).total_seconds() < 60:
+        if (now - submitted_at).total_seconds() < 120:
             continue
 
         entry = float(trade.get("entry", trade.get("entry_estimate", 0)) or 0)
@@ -670,7 +668,6 @@ def reconcile_trades(positions: dict[str, Any], open_orders: list[Any]) -> None:
                 if enum_value(leg.status) == "filled" and getattr(leg, "filled_avg_price", None):
                     exit_price = float(leg.filled_avg_price)
 
-            # Fallback für manuelle/Zeit-Exits über close_position()
             if filled and exit_price is None:
                 closed_req = GetOrdersRequest(status=QueryOrderStatus.CLOSED, symbols=[symbol], limit=10)
                 for c_order in tc.get_orders(filter=closed_req):
@@ -781,7 +778,7 @@ def get_daily_contexts() -> dict[str, pd.DataFrame]:
 
 def scan_for_entries(account: Any, positions: dict[str, Any], open_orders: list[Any]) -> None:
     equity = float(account.equity)
-    cash = float(account.cash)
+    buying_power = float(getattr(account, "buying_power", account.cash) or account.cash)
     occupied = set(positions) | {getattr(o, "symbol", None) for o in open_orders}
     occupied.discard(None)
     slots = MAX_OPEN_POSITIONS - len(occupied)
@@ -850,7 +847,7 @@ def scan_for_entries(account: Any, positions: dict[str, Any], open_orders: list[
         state.save()
         if top_watch:
             logger.info(
-                "🔍 Markt-Scan aktiv | Offene Positionen: %d/%d | Top-Kandidat: %s (Score %.0f, RSI %.1f) | Kaufsignale: %d",
+                "🔍 Markt-Scan aktiv (v9.0) | Positionen: %d/%d | Top-Kandidat: %s (Score %.0f, RSI %.1f) | Signale: %d",
                 len(occupied), MAX_OPEN_POSITIONS, top_watch[1], top_watch[0], top_watch[2], len(candidates)
             )
 
@@ -860,7 +857,7 @@ def scan_for_entries(account: Any, positions: dict[str, Any], open_orders: list[
         if slots <= 0:
             break
         qty = position_size(
-            equity=equity, cash=cash, price=price, atr=atr,
+            equity=equity, buying_power=buying_power, price=price, atr=atr,
             current_exposure=exposure, risk_factor=state.risk_factor(), score=score
         )
         if qty < 1:
@@ -869,7 +866,7 @@ def scan_for_entries(account: Any, positions: dict[str, Any], open_orders: list[
             slots -= 1
             cost = qty * price
             exposure += cost
-            cash -= cost
+            buying_power -= cost
 
 
 # ============================================================
@@ -934,7 +931,10 @@ def run_cycle() -> int:
 
 def live_main() -> None:
     init_clients()
-    notify(f"🚀 **Bot gestartet** (v8.0 15M Aggressive High-Winrate | Start ab 15:45)\nBeobachte: {', '.join(TICKERS)}")
+    notify(
+        f"🚀 **Bot gestartet** (v9.0 1H Max-Yield | {len(TICKERS)} Ticker | Start ab 15:45)\n"
+        f"Strategie: 3.5% Risiko + Conviction-Boost | 1.8x Margin-Compounding"
+    )
     consecutive_errors = 0
     while True:
         sleep_for = POLL_SECONDS
@@ -952,7 +952,7 @@ def live_main() -> None:
 
 
 # ============================================================
-# 10. BACKTEST
+# 10. BACKTEST (INKL. MARGIN-ZINSEN & TOP-AKTIEN-AUSWERTUNG)
 # ============================================================
 
 def simulate(
@@ -986,8 +986,12 @@ def simulate(
     current_day = None
     day_start_equity = capital
     halted = False
+    hourly_margin_rate = 0.065 / (252 * 6.5)
 
     for ts in timestamps:
+        if cash < 0:
+            cash -= abs(cash) * hourly_margin_rate
+
         for symbol in frames:
             row = rows[symbol].get(ts)
             if row:
@@ -1014,11 +1018,12 @@ def simulate(
             if entry <= stop + 0.01 or target <= entry:
                 continue
 
-            equity_now = cash + sum(p["qty"] * last_close.get(s, p["entry"]) for s, p in positions.items())
             exposure = sum(p["qty"] * last_close.get(s, p["entry"]) for s, p in positions.items())
+            equity_now = cash + exposure
+            buying_power_now = max(0.0, equity_now * MAX_TOTAL_EXPOSURE - exposure)
             risk_factor = LOSS_STREAK_RISK_FACTOR if consecutive_losses >= LOSS_STREAK_THROTTLE else 1.0
             qty = position_size(
-                equity_now, cash, entry, signal_atr, exposure, risk_factor, score
+                equity_now, buying_power_now, entry, signal_atr, exposure, risk_factor, score
             )
             if qty < 1:
                 continue
@@ -1093,7 +1098,7 @@ def simulate(
 def run_backtest(days: int) -> None:
     init_clients()
     now = utc_now()
-    intraday = fetch_bars(list(TICKERS), TF_INTRADAY, now - timedelta(days=days + 15))
+    intraday = fetch_bars(list(TICKERS), TF_INTRADAY, now - timedelta(days=days + 20))
     daily = fetch_bars(list(TICKERS) + [REGIME_SYMBOL], TimeFrame.Day,
                        now - timedelta(days=days + DAILY_LOOKBACK_DAYS))
     if REGIME_SYMBOL not in daily:
@@ -1113,14 +1118,21 @@ def run_backtest(days: int) -> None:
         raise SystemExit("Keine Daten für Backtest verfügbar.")
 
     result = simulate(frames)
-    print("\n=========== BACKTEST v8.0 15M Aggressive High-Winrate ===========")
+    print(f"\n=========== BACKTEST v9.0 Maximum-Yield ({len(TICKERS)} Ticker, 1H) ===========")
     print(f"Trades: {result['n_trades']}")
     if result["n_trades"]:
-        print(f"Trefferquote: {result.get('win_rate', 0):.1%} | Ø Ergebnis: {result.get('avg_r', 0):+.2f}R | Rendite: {result.get('total_return', 0):+.2%} | Max. Drawdown: {result.get('max_drawdown', 0):.2%}")
+        print(
+            f"Trefferquote: {result.get('win_rate', 0):.1%} | Ø Ergebnis: {result.get('avg_r', 0):+.2f}R | "
+            f"Rendite: {result.get('total_return', 0):+.2%} | Max. Drawdown: {result.get('max_drawdown', 0):.2%}"
+        )
+        tdf = result["trades"]
+        top_syms = tdf.groupby("symbol")["pnl"].sum().sort_values(ascending=False).head(3)
+        top_str = ", ".join(f"{s} ({v:+,.0f}$)" for s, v in top_syms.items())
+        print(f"Top-Gewinner: {top_str}")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Smart Trading Bot v8.0")
+    parser = argparse.ArgumentParser(description="Smart Trading Bot v9.0 Maximum-Yield")
     parser.add_argument("--backtest", action="store_true")
     parser.add_argument("--days", type=int, default=120)
     args = parser.parse_args()
